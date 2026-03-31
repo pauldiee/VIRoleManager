@@ -62,11 +62,15 @@
 .NOTES
     Author   : Paul van Dieen
     Blog     : https://www.hollebollevsan.nl
-    Version  : 1.1.1
+    Version  : 1.1.2
     Requires : VCF.PowerCLI 9.0+ (recommended) or VMware.PowerCLI 13+
     Tested   : vSphere 9
 
 .CHANGELOG
+    v1.1.2  2026-03-31  Paul van Dieen
+        - Bug fix: all PowerCLI cmdlets now scoped with -Server $viConn to
+          prevent reading/writing across linked vCenter instances
+
     v1.1.1  2026-03-31  Paul van Dieen
         - Bug fix: removed Set-VIRole -Description call — parameter does not
           exist in VCF.PowerCLI 9; description is preserved in the JSON export
@@ -103,7 +107,7 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$scriptVersion = '1.1.1'
+$scriptVersion = '1.1.2'
 $scriptAuthor  = 'Paul van Dieen'
 $scriptBlogUrl = 'https://www.hollebollevsan.nl'
 $scriptDir     = if ($PSScriptRoot) { $PSScriptRoot } else { (Get-Location).Path }
@@ -190,8 +194,8 @@ if ($Mode -eq 'Export') {
             $scriptDir
         }
 
-        # Get all custom (non-system) roles
-        $allRoles = @(Get-VIRole -ErrorAction Stop | Where-Object { -not $_.IsSystem } | Sort-Object Name)
+        # Get all custom (non-system) roles — scope to this vCenter only
+        $allRoles = @(Get-VIRole -Server $viConn -ErrorAction Stop | Where-Object { -not $_.IsSystem } | Sort-Object Name)
         if ($allRoles.Count -eq 0) {
             Write-Host "  [WARN] No custom roles found on $vCenterServer." -ForegroundColor Yellow
         } else {
@@ -289,19 +293,19 @@ if ($Mode -eq 'Import') {
         Write-Host "  [INFO] Importing as role '$targetName' ($($import.Privileges.Count) privilege(s) in source)." -ForegroundColor Cyan
         Write-Host "  [INFO] Originally exported from $($import.ExportedFrom) on $($import.ExportedAt)." -ForegroundColor Cyan
 
-        # Check for existing role
-        $existing = Get-VIRole -Name $targetName -ErrorAction SilentlyContinue
+        # Check for existing role — scope to this vCenter only
+        $existing = Get-VIRole -Server $viConn -Name $targetName -ErrorAction SilentlyContinue
         if ($existing) {
             Write-Host "  [ERROR] Role '$targetName' already exists. Use -NewRoleName to specify a different name." -ForegroundColor Red
             exit 1
         }
 
-        # Resolve privileges — collect found and report missing
+        # Resolve privileges — scope to this vCenter only, collect found and report missing
         $privsToAdd  = [System.Collections.Generic.List[object]]::new()
         $skippedList = [System.Collections.Generic.List[string]]::new()
 
         foreach ($privId in $import.Privileges) {
-            $priv = Get-VIPrivilege -Id $privId -ErrorAction SilentlyContinue
+            $priv = Get-VIPrivilege -Server $viConn -Id $privId -ErrorAction SilentlyContinue
             if ($priv) {
                 $privsToAdd.Add($priv)
             } else {
@@ -316,12 +320,12 @@ if ($Mode -eq 'Import') {
             }
         }
 
-        # Create role and apply all resolved privileges in a single call
+        # Create role and apply all resolved privileges in a single call — scope to this vCenter only
         Write-Host "  [INFO] Creating role '$targetName'..." -ForegroundColor Cyan
-        $newRole = New-VIRole -Name $targetName -ErrorAction Stop
+        $newRole = New-VIRole -Server $viConn -Name $targetName -ErrorAction Stop
 
         if ($privsToAdd.Count -gt 0) {
-            $null = Set-VIRole -Role $newRole -AddPrivilege $privsToAdd.ToArray() -ErrorAction Stop
+            $null = Set-VIRole -Server $viConn -Role $newRole -AddPrivilege $privsToAdd.ToArray() -ErrorAction Stop
         }
 
         Write-Host "  [OK]   Role '$targetName' created: $($privsToAdd.Count) privilege(s) applied, $($skippedList.Count) skipped." -ForegroundColor Green
