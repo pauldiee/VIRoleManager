@@ -64,11 +64,15 @@
 .NOTES
     Author   : Paul van Dieen
     Blog     : https://www.hollebollevsan.nl
-    Version  : 1.2.1
+    Version  : 1.2.2
     Requires : VCF.PowerCLI 9.0+ (recommended) or VMware.PowerCLI 13+
     Tested   : vSphere 9
 
 .CHANGELOG
+    v1.2.2  2026-03-31  Paul van Dieen
+        - Bug fix: -f format strings changed from double-quoted to single-quoted
+          to prevent PS5 from misinterpreting {n} format tokens as script blocks
+
     v1.2.1  2026-03-31  Paul van Dieen
         - Added #Requires -Version 5.1 for explicit PS5 compatibility
 
@@ -122,7 +126,7 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$scriptVersion = '1.2.1'
+$scriptVersion = '1.2.2'
 $scriptAuthor  = 'Paul van Dieen'
 $scriptBlogUrl = 'https://www.hollebollevsan.nl'
 $scriptDir     = if ($PSScriptRoot) { $PSScriptRoot } else { (Get-Location).Path }
@@ -228,7 +232,7 @@ if ($Mode -eq 'Export') {
                 Write-Host ""
                 for ($i = 0; $i -lt $allRoles.Count; $i++) {
                     $privCount = $allRoles[$i].ExtensionData.Privilege.Count
-                    $line = "   [{0,2}]  {1,-45} ({2} privileges)" -f ($i + 1), $allRoles[$i].Name, $privCount
+                    $line = '   [{0,2}]  {1,-45} ({2} privileges)' -f ($i + 1), $allRoles[$i].Name, $privCount
                     Write-Host $line -ForegroundColor White
                 }
                 Write-Host ""
@@ -330,9 +334,9 @@ if ($Mode -eq 'Import') {
                         $peek     = Get-Content $jsonFiles[$i].FullName -Raw | ConvertFrom-Json
                         $roleName = if ($peek.PSObject.Properties['RoleName']) { $peek.RoleName } else { '?' }
                         $privCnt  = if ($peek.PSObject.Properties['PrivilegeCount']) { $peek.PrivilegeCount } else { '?' }
-                        $line = "   [{0,2}]  {1,-35} role: {2,-30} ({3} privileges)" -f ($i + 1), $jsonFiles[$i].Name, $roleName, $privCnt
+                        $line = '   [{0,2}]  {1,-35} role: {2,-30} ({3} privileges)' -f ($i + 1), $jsonFiles[$i].Name, $roleName, $privCnt
                     } catch {
-                        $line = "   [{0,2}]  {1}" -f ($i + 1), $jsonFiles[$i].Name
+                        $line = '   [{0,2}]  {1}' -f ($i + 1), $jsonFiles[$i].Name
                     }
                     Write-Host $line -ForegroundColor White
                 }
