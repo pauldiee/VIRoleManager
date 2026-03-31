@@ -16,11 +16,13 @@
     'Export' to save a role to file, or 'Import' to create a role from file.
 
 .PARAMETER RoleName
-    Name of the role to export. Required for Export mode.
+    Name of the role to export. Optional for Export mode — if omitted the script
+    lists all custom roles and prompts for interactive selection.
 
 .PARAMETER FilePath
     Path to the JSON file.
-    - Export: output file path. Defaults to <RoleName>.json next to the script.
+    - Export: output directory or file path. When exporting multiple roles,
+      must be a directory. Defaults to the script directory.
     - Import: input file path. Required for Import mode.
 
 .PARAMETER NewRoleName
@@ -38,7 +40,11 @@
     Force a new credential prompt even if a saved credential file exists.
 
 .EXAMPLE
-    # Export a role to JSON
+    # Interactive export — lists all custom roles, prompts for selection
+    .\Invoke-VIRoleManager.ps1 -vCenterServer vc01.lab.local -Mode Export
+
+.EXAMPLE
+    # Non-interactive export — export a specific role directly
     .\Invoke-VIRoleManager.ps1 -vCenterServer vc01.lab.local -Mode Export -RoleName "Custom Ops Role"
 
 .EXAMPLE
@@ -51,16 +57,22 @@
 
 .EXAMPLE
     # Lab environment with self-signed certificate
-    .\Invoke-VIRoleManager.ps1 -vCenterServer vc01.lab.local -Mode Export -RoleName "Custom Ops Role" -SkipCertificateValidation
+    .\Invoke-VIRoleManager.ps1 -vCenterServer vc01.lab.local -Mode Export -SkipCertificateValidation
 
 .NOTES
     Author   : Paul van Dieen
     Blog     : https://www.hollebollevsan.nl
-    Version  : 1.0.0
+    Version  : 1.1.0
     Requires : VCF.PowerCLI 9.0+ (recommended) or VMware.PowerCLI 13+
     Tested   : vSphere 9
 
 .CHANGELOG
+    v1.1.0  2026-03-31  Paul van Dieen
+        - Export mode: interactive role picker when -RoleName is omitted —
+          lists all custom (non-system) roles with privilege counts, accepts
+          comma-separated numbers or 'all'; each role exported to its own JSON
+        - -RoleName is now optional for Export; still accepted for scripted use
+
     v1.0.0  2026-03-31  Paul van Dieen
         - Initial structured release
         - Export mode: writes role name, description, privilege IDs and metadata
@@ -86,7 +98,7 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$scriptVersion = '1.0.0'
+$scriptVersion = '1.1.0'
 $scriptAuthor  = 'Paul van Dieen'
 $scriptBlogUrl = 'https://www.hollebollevsan.nl'
 $scriptDir     = if ($PSScriptRoot) { $PSScriptRoot } else { (Get-Location).Path }
@@ -99,10 +111,6 @@ Write-Host "  Blog   : $scriptBlogUrl" -ForegroundColor DarkGray
 Write-Host ('=' * 62) -ForegroundColor DarkCyan
 
 # --- Validate mode-specific required parameters --------------------------------
-if ($Mode -eq 'Export' -and -not $RoleName) {
-    Write-Host "  [ERROR] -RoleName is required for Export mode." -ForegroundColor Red
-    exit 1
-}
 if ($Mode -eq 'Import' -and -not $FilePath) {
     Write-Host "  [ERROR] -FilePath is required for Import mode." -ForegroundColor Red
     exit 1
@@ -168,29 +176,97 @@ try {
 # =============================================================================
 if ($Mode -eq 'Export') {
     try {
-        Write-Host "  [INFO] Fetching role '$RoleName'..." -ForegroundColor Cyan
-        $role = Get-VIRole -Name $RoleName -ErrorAction Stop
-
-        $privileges = @($role.ExtensionData.Privilege)
-        Write-Host "  [INFO] Found $($privileges.Count) privilege(s)." -ForegroundColor Cyan
-
-        $export = [PSCustomObject]@{
-            ExportedFrom  = $vCenterServer
-            ExportedAt    = (Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
-            ScriptVersion = $scriptVersion
-            RoleName      = $role.Name
-            Description   = if ($role.Description) { $role.Description } else { '' }
-            PrivilegeCount= $privileges.Count
-            Privileges    = $privileges
+        # Resolve output directory
+        $outDir = if ($FilePath -and (Test-Path $FilePath -PathType Container)) {
+            $FilePath
+        } elseif ($FilePath -and -not [System.IO.Path]::GetExtension($FilePath)) {
+            $FilePath   # treat as directory even if it doesn't exist yet
+        } else {
+            $scriptDir
         }
 
-        if (-not $FilePath) {
-            $safeName = $RoleName -replace '[^\w\-]', '_'
-            $FilePath = Join-Path $scriptDir "$safeName.json"
-        }
+        # Get all custom (non-system) roles
+        $allRoles = @(Get-VIRole -ErrorAction Stop | Where-Object { -not $_.IsSystem } | Sort-Object Name)
+        if ($allRoles.Count -eq 0) {
+            Write-Host "  [WARN] No custom roles found on $vCenterServer." -ForegroundColor Yellow
+        } else {
+            # Determine which roles to export
+            $rolesToExport = [System.Collections.Generic.List[object]]::new()
 
-        $export | ConvertTo-Json -Depth 5 | Out-File -FilePath $FilePath -Encoding UTF8
-        Write-Host "  [OK]   Role '$RoleName' exported to: $FilePath" -ForegroundColor Green
+            if ($RoleName) {
+                # Non-interactive: -RoleName supplied directly
+                $match = $allRoles | Where-Object { $_.Name -eq $RoleName }
+                if (-not $match) {
+                    Write-Host "  [ERROR] Role '$RoleName' not found or is a system role." -ForegroundColor Red
+                    exit 1
+                }
+                $rolesToExport.Add($match)
+            } else {
+                # Interactive picker
+                Write-Host ""
+                Write-Host "  Custom roles on $vCenterServer`:" -ForegroundColor Cyan
+                Write-Host ""
+                for ($i = 0; $i -lt $allRoles.Count; $i++) {
+                    $privCount = $allRoles[$i].ExtensionData.Privilege.Count
+                    $line = "   [{0,2}]  {1,-45} ({2} privileges)" -f ($i + 1), $allRoles[$i].Name, $privCount
+                    Write-Host $line -ForegroundColor White
+                }
+                Write-Host ""
+                $selection = Read-Host "  Enter number(s) to export (comma-separated, or 'all')"
+                $selection = $selection.Trim()
+
+                if ($selection -ieq 'all') {
+                    foreach ($r in $allRoles) { $rolesToExport.Add($r) }
+                } else {
+                    foreach ($token in ($selection -split ',')) {
+                        $token = $token.Trim()
+                        $idx   = 0
+                        if ([int]::TryParse($token, [ref]$idx) -and $idx -ge 1 -and $idx -le $allRoles.Count) {
+                            $rolesToExport.Add($allRoles[$idx - 1])
+                        } else {
+                            Write-Host "  [WARN] '$token' is not a valid selection — skipped." -ForegroundColor Yellow
+                        }
+                    }
+                }
+            }
+
+            if ($rolesToExport.Count -eq 0) {
+                Write-Host "  [WARN] No roles selected." -ForegroundColor Yellow
+            } else {
+                Write-Host ""
+                foreach ($role in $rolesToExport) {
+                    try {
+                        $privileges = @($role.ExtensionData.Privilege)
+                        $export = [PSCustomObject]@{
+                            ExportedFrom   = $vCenterServer
+                            ExportedAt     = (Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
+                            ScriptVersion  = $scriptVersion
+                            RoleName       = $role.Name
+                            Description    = if ($role.Description) { $role.Description } else { '' }
+                            PrivilegeCount = $privileges.Count
+                            Privileges     = $privileges
+                        }
+
+                        # If -FilePath points to a single file and only one role — honour it; else use directory
+                        $outFile = if ($FilePath -and $rolesToExport.Count -eq 1 -and [System.IO.Path]::GetExtension($FilePath) -ne '') {
+                            $FilePath
+                        } else {
+                            $safeName = $role.Name -replace '[^\w\-]', '_'
+                            Join-Path $outDir "$safeName.json"
+                        }
+
+                        if (-not (Test-Path (Split-Path $outFile -Parent))) {
+                            $null = New-Item -ItemType Directory -Path (Split-Path $outFile -Parent) -Force
+                        }
+
+                        $export | ConvertTo-Json -Depth 5 | Out-File -FilePath $outFile -Encoding UTF8
+                        Write-Host "  [OK]   '$($role.Name)' — $($privileges.Count) privilege(s) — exported to: $outFile" -ForegroundColor Green
+                    } catch {
+                        Write-Host "  [ERROR] Failed to export '$($role.Name)': $_" -ForegroundColor Red
+                    }
+                }
+            }
+        }
     } catch {
         Write-Host "  [ERROR] Export failed: $_" -ForegroundColor Red
     }
