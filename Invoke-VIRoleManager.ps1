@@ -20,10 +20,12 @@
     lists all custom roles and prompts for interactive selection.
 
 .PARAMETER FilePath
-    Path to the JSON file.
+    Path to a JSON file or directory.
     - Export: output directory or file path. When exporting multiple roles,
       must be a directory. Defaults to the script directory.
-    - Import: input file path. Required for Import mode.
+    - Import: specific JSON file, or a directory to scan for JSON files.
+      If omitted, the script directory is scanned. When multiple files are
+      found an interactive picker is shown.
 
 .PARAMETER NewRoleName
     Name for the imported role. Defaults to the role name stored in the export
@@ -62,11 +64,19 @@
 .NOTES
     Author   : Paul van Dieen
     Blog     : https://www.hollebollevsan.nl
-    Version  : 1.1.2
+    Version  : 1.2.0
     Requires : VCF.PowerCLI 9.0+ (recommended) or VMware.PowerCLI 13+
     Tested   : vSphere 9
 
 .CHANGELOG
+    v1.2.0  2026-03-31  Paul van Dieen
+        - Import mode: interactive JSON file picker — scans script directory
+          (or -FilePath directory) for JSON files, shows role name and privilege
+          count from each file, accepts comma-separated selection or 'all'
+        - -FilePath no longer required for Import; single-file and directory
+          paths both accepted; existing-role conflict downgrades to warning
+          and continues with remaining files
+
     v1.1.2  2026-03-31  Paul van Dieen
         - Bug fix: all PowerCLI cmdlets now scoped with -Server $viConn to
           prevent reading/writing across linked vCenter instances
@@ -107,7 +117,7 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$scriptVersion = '1.1.2'
+$scriptVersion = '1.2.0'
 $scriptAuthor  = 'Paul van Dieen'
 $scriptBlogUrl = 'https://www.hollebollevsan.nl'
 $scriptDir     = if ($PSScriptRoot) { $PSScriptRoot } else { (Get-Location).Path }
@@ -119,11 +129,7 @@ Write-Host "  Author : $scriptAuthor"  -ForegroundColor Cyan
 Write-Host "  Blog   : $scriptBlogUrl" -ForegroundColor DarkGray
 Write-Host ('=' * 62) -ForegroundColor DarkCyan
 
-# --- Validate mode-specific required parameters --------------------------------
-if ($Mode -eq 'Import' -and -not $FilePath) {
-    Write-Host "  [ERROR] -FilePath is required for Import mode." -ForegroundColor Red
-    exit 1
-}
+# --- No mandatory pre-flight validation needed — both modes handle missing params interactively
 
 # --- PowerCLI Module Check ----------------------------------------------------
 $vcfModule    = Get-Module -Name VCF.PowerCLI              -ListAvailable
@@ -286,49 +292,111 @@ if ($Mode -eq 'Export') {
 # =============================================================================
 if ($Mode -eq 'Import') {
     try {
-        Write-Host "  [INFO] Reading $FilePath..." -ForegroundColor Cyan
-        $import = Get-Content -Path $FilePath -Raw -ErrorAction Stop | ConvertFrom-Json
-
-        $targetName = if ($NewRoleName) { $NewRoleName } else { $import.RoleName }
-        Write-Host "  [INFO] Importing as role '$targetName' ($($import.Privileges.Count) privilege(s) in source)." -ForegroundColor Cyan
-        Write-Host "  [INFO] Originally exported from $($import.ExportedFrom) on $($import.ExportedAt)." -ForegroundColor Cyan
-
-        # Check for existing role — scope to this vCenter only
-        $existing = Get-VIRole -Server $viConn -Name $targetName -ErrorAction SilentlyContinue
-        if ($existing) {
-            Write-Host "  [ERROR] Role '$targetName' already exists. Use -NewRoleName to specify a different name." -ForegroundColor Red
-            exit 1
+        # Resolve search directory and build list of JSON files to pick from
+        $searchDir = if ($FilePath -and (Test-Path $FilePath -PathType Container)) {
+            $FilePath
+        } elseif ($FilePath -and [System.IO.Path]::GetExtension($FilePath) -ne '') {
+            $null   # specific file supplied — skip picker
+        } else {
+            $scriptDir
         }
 
-        # Resolve privileges — scope to this vCenter only, collect found and report missing
-        $privsToAdd  = [System.Collections.Generic.List[object]]::new()
-        $skippedList = [System.Collections.Generic.List[string]]::new()
+        $filesToImport = [System.Collections.Generic.List[string]]::new()
 
-        foreach ($privId in $import.Privileges) {
-            $priv = Get-VIPrivilege -Server $viConn -Id $privId -ErrorAction SilentlyContinue
-            if ($priv) {
-                $privsToAdd.Add($priv)
+        if ($null -eq $searchDir) {
+            # Non-interactive: single file supplied directly
+            $filesToImport.Add($FilePath)
+        } else {
+            $jsonFiles = @(Get-ChildItem -Path $searchDir -Filter '*.json' -File | Sort-Object Name)
+            if ($jsonFiles.Count -eq 0) {
+                Write-Host "  [WARN] No JSON files found in $searchDir." -ForegroundColor Yellow
+            } elseif ($jsonFiles.Count -eq 1) {
+                # Only one file — use it without prompting
+                Write-Host "  [INFO] Found 1 file: $($jsonFiles[0].Name)" -ForegroundColor Cyan
+                $filesToImport.Add($jsonFiles[0].FullName)
             } else {
-                $skippedList.Add($privId)
+                # Interactive picker
+                Write-Host ""
+                Write-Host "  JSON files in $searchDir`:" -ForegroundColor Cyan
+                Write-Host ""
+                for ($i = 0; $i -lt $jsonFiles.Count; $i++) {
+                    # Peek at role name inside the file
+                    try {
+                        $peek     = Get-Content $jsonFiles[$i].FullName -Raw | ConvertFrom-Json
+                        $roleName = if ($peek.PSObject.Properties['RoleName']) { $peek.RoleName } else { '?' }
+                        $privCnt  = if ($peek.PSObject.Properties['PrivilegeCount']) { $peek.PrivilegeCount } else { '?' }
+                        $line = "   [{0,2}]  {1,-35} role: {2,-30} ({3} privileges)" -f ($i + 1), $jsonFiles[$i].Name, $roleName, $privCnt
+                    } catch {
+                        $line = "   [{0,2}]  {1}" -f ($i + 1), $jsonFiles[$i].Name
+                    }
+                    Write-Host $line -ForegroundColor White
+                }
+                Write-Host ""
+                $selection = Read-Host "  Enter number(s) to import (comma-separated, or 'all')"
+                $selection = $selection.Trim()
+
+                if ($selection -ieq 'all') {
+                    foreach ($f in $jsonFiles) { $filesToImport.Add($f.FullName) }
+                } else {
+                    foreach ($token in ($selection -split ',')) {
+                        $token = $token.Trim()
+                        $idx   = 0
+                        if ([int]::TryParse($token, [ref]$idx) -and $idx -ge 1 -and $idx -le $jsonFiles.Count) {
+                            $filesToImport.Add($jsonFiles[$idx - 1].FullName)
+                        } else {
+                            Write-Host "  [WARN] '$token' is not a valid selection — skipped." -ForegroundColor Yellow
+                        }
+                    }
+                }
             }
         }
 
-        if ($skippedList.Count -gt 0) {
-            Write-Host "  [WARN] $($skippedList.Count) privilege(s) not found in target vCenter and will be skipped:" -ForegroundColor Yellow
-            foreach ($s in $skippedList) {
-                Write-Host "         - $s" -ForegroundColor Yellow
+        if ($filesToImport.Count -eq 0) {
+            Write-Host "  [WARN] No files selected." -ForegroundColor Yellow
+        } else {
+            Write-Host ""
+            foreach ($file in $filesToImport) {
+                try {
+                    Write-Host "  [INFO] Reading $file..." -ForegroundColor Cyan
+                    $import = Get-Content -Path $file -Raw -ErrorAction Stop | ConvertFrom-Json
+
+                    # -NewRoleName only applies when importing a single file
+                    $targetName = if ($NewRoleName -and $filesToImport.Count -eq 1) { $NewRoleName } else { $import.RoleName }
+                    Write-Host "  [INFO] Importing as '$targetName' ($($import.Privileges.Count) privilege(s), exported from $($import.ExportedFrom) on $($import.ExportedAt))." -ForegroundColor Cyan
+
+                    # Check for existing role — scope to this vCenter only
+                    $existing = Get-VIRole -Server $viConn -Name $targetName -ErrorAction SilentlyContinue
+                    if ($existing) {
+                        Write-Host "  [WARN] Role '$targetName' already exists — skipped. Use -NewRoleName to import under a different name." -ForegroundColor Yellow
+                        continue
+                    }
+
+                    # Resolve privileges — scope to this vCenter only
+                    $privsToAdd  = [System.Collections.Generic.List[object]]::new()
+                    $skippedList = [System.Collections.Generic.List[string]]::new()
+
+                    foreach ($privId in $import.Privileges) {
+                        $priv = Get-VIPrivilege -Server $viConn -Id $privId -ErrorAction SilentlyContinue
+                        if ($priv) { $privsToAdd.Add($priv) } else { $skippedList.Add($privId) }
+                    }
+
+                    if ($skippedList.Count -gt 0) {
+                        Write-Host "  [WARN] $($skippedList.Count) privilege(s) not found in target vCenter and will be skipped:" -ForegroundColor Yellow
+                        foreach ($s in $skippedList) { Write-Host "         - $s" -ForegroundColor Yellow }
+                    }
+
+                    # Create role and apply all resolved privileges in a single call
+                    $newRole = New-VIRole -Server $viConn -Name $targetName -ErrorAction Stop
+                    if ($privsToAdd.Count -gt 0) {
+                        $null = Set-VIRole -Server $viConn -Role $newRole -AddPrivilege $privsToAdd.ToArray() -ErrorAction Stop
+                    }
+
+                    Write-Host "  [OK]   '$targetName' created: $($privsToAdd.Count) privilege(s) applied, $($skippedList.Count) skipped." -ForegroundColor Green
+                } catch {
+                    Write-Host "  [ERROR] Failed to import '$file': $_" -ForegroundColor Red
+                }
             }
         }
-
-        # Create role and apply all resolved privileges in a single call — scope to this vCenter only
-        Write-Host "  [INFO] Creating role '$targetName'..." -ForegroundColor Cyan
-        $newRole = New-VIRole -Server $viConn -Name $targetName -ErrorAction Stop
-
-        if ($privsToAdd.Count -gt 0) {
-            $null = Set-VIRole -Server $viConn -Role $newRole -AddPrivilege $privsToAdd.ToArray() -ErrorAction Stop
-        }
-
-        Write-Host "  [OK]   Role '$targetName' created: $($privsToAdd.Count) privilege(s) applied, $($skippedList.Count) skipped." -ForegroundColor Green
     } catch {
         Write-Host "  [ERROR] Import failed: $_" -ForegroundColor Red
     }
