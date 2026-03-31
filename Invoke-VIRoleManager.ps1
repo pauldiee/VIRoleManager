@@ -64,11 +64,14 @@
 .NOTES
     Author   : Paul van Dieen
     Blog     : https://www.hollebollevsan.nl
-    Version  : 1.2.0
+    Version  : 1.2.1
     Requires : VCF.PowerCLI 9.0+ (recommended) or VMware.PowerCLI 13+
     Tested   : vSphere 9
 
 .CHANGELOG
+    v1.2.1  2026-03-31  Paul van Dieen
+        - Added #Requires -Version 5.1 for explicit PS5 compatibility
+
     v1.2.0  2026-03-31  Paul van Dieen
         - Import mode: interactive JSON file picker — scans script directory
           (or -FilePath directory) for JSON files, shows role name and privilege
@@ -102,6 +105,8 @@
         - Supports VCF.PowerCLI 9.0+ and VMware.PowerCLI 13+
 #>
 
+#Requires -Version 5.1
+
 [CmdletBinding()]
 param(
     [Parameter(Mandatory)][string]$vCenterServer,
@@ -117,7 +122,7 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$scriptVersion = '1.2.0'
+$scriptVersion = '1.2.1'
 $scriptAuthor  = 'Paul van Dieen'
 $scriptBlogUrl = 'https://www.hollebollevsan.nl'
 $scriptDir     = if ($PSScriptRoot) { $PSScriptRoot } else { (Get-Location).Path }
