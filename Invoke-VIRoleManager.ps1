@@ -62,11 +62,16 @@
 .NOTES
     Author   : Paul van Dieen
     Blog     : https://www.hollebollevsan.nl
-    Version  : 1.1.0
+    Version  : 1.1.1
     Requires : VCF.PowerCLI 9.0+ (recommended) or VMware.PowerCLI 13+
     Tested   : vSphere 9
 
 .CHANGELOG
+    v1.1.1  2026-03-31  Paul van Dieen
+        - Bug fix: removed Set-VIRole -Description call — parameter does not
+          exist in VCF.PowerCLI 9; description is preserved in the JSON export
+          but not applied on import
+
     v1.1.0  2026-03-31  Paul van Dieen
         - Export mode: interactive role picker when -RoleName is omitted —
           lists all custom (non-system) roles with privilege counts, accepts
@@ -98,7 +103,7 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$scriptVersion = '1.1.0'
+$scriptVersion = '1.1.1'
 $scriptAuthor  = 'Paul van Dieen'
 $scriptBlogUrl = 'https://www.hollebollevsan.nl'
 $scriptDir     = if ($PSScriptRoot) { $PSScriptRoot } else { (Get-Location).Path }
@@ -314,10 +319,6 @@ if ($Mode -eq 'Import') {
         # Create role and apply all resolved privileges in a single call
         Write-Host "  [INFO] Creating role '$targetName'..." -ForegroundColor Cyan
         $newRole = New-VIRole -Name $targetName -ErrorAction Stop
-
-        if ($import.Description) {
-            $null = Set-VIRole -Role $newRole -Description $import.Description -ErrorAction SilentlyContinue
-        }
 
         if ($privsToAdd.Count -gt 0) {
             $null = Set-VIRole -Role $newRole -AddPrivilege $privsToAdd.ToArray() -ErrorAction Stop
