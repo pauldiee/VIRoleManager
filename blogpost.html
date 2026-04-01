@@ -1,0 +1,234 @@
+<!-- wp:paragraph -->
+<p>If you have ever spent time carefully building custom roles in vCenter — defining exactly which privileges a monitoring account, a backup service, or a Tanzu user needs — you know how tedious it is to recreate those same roles on a second vCenter. There is no native export button in the vSphere Client. You either document every privilege manually and click through the UI again, or you copy-paste privilege IDs until something goes missing.</p>
+<!-- /wp:paragraph -->
+
+<!-- wp:paragraph -->
+<p>That problem got old quickly, so I wrote <code>Invoke-VIRoleManager.ps1</code>.</p>
+<!-- /wp:paragraph -->
+
+<!-- wp:separator -->
+<hr class="wp-block-separator"/>
+<!-- /wp:separator -->
+
+<!-- wp:heading -->
+<h2>What it does</h2>
+<!-- /wp:heading -->
+
+<!-- wp:paragraph -->
+<p>The script connects to a vCenter Server using VCF.PowerCLI (or VMware.PowerCLI) and operates in one of two modes:</p>
+<!-- /wp:paragraph -->
+
+<!-- wp:paragraph -->
+<p><strong>Export</strong> reads all custom (non-system) roles from the source vCenter and saves each one as a portable JSON file. The file contains the role name, description, and the complete list of privilege IDs. You can export a single role by name, or use the interactive picker to choose one or more from a numbered list.</p>
+<!-- /wp:paragraph -->
+
+<!-- wp:paragraph -->
+<p><strong>Import</strong> reads a previously exported JSON file and recreates the role on the target vCenter, applying all privileges that exist there. Any privilege IDs that no longer exist — for example, a privilege removed in a newer vSphere release — are reported and skipped. The role is still created with the remaining privileges. You can also rename the role on import with <code>-NewRoleName</code>.</p>
+<!-- /wp:paragraph -->
+
+<!-- wp:separator -->
+<hr class="wp-block-separator"/>
+<!-- /wp:separator -->
+
+<!-- wp:heading -->
+<h2>Why I needed this</h2>
+<!-- /wp:heading -->
+
+<!-- wp:paragraph -->
+<p>The immediate trigger was a VCF 9 lab migration. I had a handful of custom roles on one vCenter that needed to land identically on a second one. With VCF 9 vCenter linking, the two vCenters are in the same SSO domain but operate independently — roles do not sync automatically. Doing it by hand once is fine; doing it repeatedly across environments is not.</p>
+<!-- /wp:paragraph -->
+
+<!-- wp:paragraph -->
+<p>A secondary use case is pre-upgrade backup. Before a major vSphere upgrade I now run an export pass on all custom roles. If something goes wrong with the upgrade, or if a privilege ID is retired in the new release, I have a clear record of what existed before and exactly what changed.</p>
+<!-- /wp:paragraph -->
+
+<!-- wp:separator -->
+<hr class="wp-block-separator"/>
+<!-- /wp:separator -->
+
+<!-- wp:heading -->
+<h2>Requirements</h2>
+<!-- /wp:heading -->
+
+<!-- wp:list -->
+<ul>
+  <li>PowerShell 5.1 or later</li>
+  <li>VCF.PowerCLI 9.0+ (recommended) or VMware.PowerCLI 13+</li>
+  <li>Network access to vCenter (HTTPS)</li>
+</ul>
+<!-- /wp:list -->
+
+<!-- wp:paragraph -->
+<p>Install the module if you do not have it already:</p>
+<!-- /wp:paragraph -->
+
+<!-- wp:code -->
+<pre class="wp-block-code"><code>Install-Module -Name VCF.PowerCLI -Scope CurrentUser</code></pre>
+<!-- /wp:code -->
+
+<!-- wp:separator -->
+<hr class="wp-block-separator"/>
+<!-- /wp:separator -->
+
+<!-- wp:heading -->
+<h2>Usage</h2>
+<!-- /wp:heading -->
+
+<!-- wp:paragraph -->
+<p><strong>Interactive export</strong> — connects to vCenter, lists all custom roles, and asks which ones to export:</p>
+<!-- /wp:paragraph -->
+
+<!-- wp:code -->
+<pre class="wp-block-code"><code>.\Invoke-VIRoleManager.ps1 -vCenterServer vc01.vcf.lab -Mode Export</code></pre>
+<!-- /wp:code -->
+
+<!-- wp:paragraph -->
+<p>The picker looks like this:</p>
+<!-- /wp:paragraph -->
+
+<!-- wp:code -->
+<pre class="wp-block-code"><code>  Custom roles on vc01.vcf.lab:
+
+   [ 1]  TanzuUser                                     (6 privileges)
+   [ 2]  VDI Admins                                    (28 privileges)
+   [ 3]  Custom Read-Only                              (12 privileges)
+
+  Enter number(s) to export (comma-separated, or 'all'):</code></pre>
+<!-- /wp:code -->
+
+<!-- wp:paragraph -->
+<p>Enter <code>1,3</code> to export two roles, or <code>all</code> to export every custom role. Each selected role is saved as its own JSON file in the script directory.</p>
+<!-- /wp:paragraph -->
+
+<!-- wp:paragraph -->
+<p><strong>Non-interactive export</strong> — for scripting or scheduled runs:</p>
+<!-- /wp:paragraph -->
+
+<!-- wp:code -->
+<pre class="wp-block-code"><code>.\Invoke-VIRoleManager.ps1 -vCenterServer vc01.vcf.lab -Mode Export -RoleName "TanzuUser" -FilePath C:\RoleBackups</code></pre>
+<!-- /wp:code -->
+
+<!-- wp:paragraph -->
+<p><strong>Import</strong> — scans a directory for JSON files and presents a picker:</p>
+<!-- /wp:paragraph -->
+
+<!-- wp:code -->
+<pre class="wp-block-code"><code>.\Invoke-VIRoleManager.ps1 -vCenterServer vc02.vcf.lab -Mode Import -FilePath C:\RoleBackups</code></pre>
+<!-- /wp:code -->
+
+<!-- wp:code -->
+<pre class="wp-block-code"><code>  JSON files in C:\RoleBackups:
+
+   [ 1]  TanzuUser.json               role: TanzuUser                    (6 privileges)
+   [ 2]  VDI_Admins.json              role: VDI Admins                   (28 privileges)
+
+  Enter number(s) to import (comma-separated, or 'all'):</code></pre>
+<!-- /wp:code -->
+
+<!-- wp:paragraph -->
+<p><strong>Import a single file and rename the role:</strong></p>
+<!-- /wp:paragraph -->
+
+<!-- wp:code -->
+<pre class="wp-block-code"><code>.\Invoke-VIRoleManager.ps1 -vCenterServer vc02.vcf.lab -Mode Import -FilePath .\TanzuUser.json -NewRoleName "TanzuUser-v2"</code></pre>
+<!-- /wp:code -->
+
+<!-- wp:paragraph -->
+<p><strong>Lab environments with self-signed certificates:</strong></p>
+<!-- /wp:paragraph -->
+
+<!-- wp:code -->
+<pre class="wp-block-code"><code>.\Invoke-VIRoleManager.ps1 -vCenterServer vc01.vcf.lab -Mode Export -SkipCertificateValidation</code></pre>
+<!-- /wp:code -->
+
+<!-- wp:separator -->
+<hr class="wp-block-separator"/>
+<!-- /wp:separator -->
+
+<!-- wp:heading -->
+<h2>Credential handling</h2>
+<!-- /wp:heading -->
+
+<!-- wp:paragraph -->
+<p>On first run, the script prompts for credentials and saves them encrypted next to the script as <code>&lt;hostname&gt;.cred</code>. This uses PowerShell's <code>Export-Clixml</code>, which protects the credential with DPAPI — it is tied to the current Windows user and machine. On subsequent runs the saved credential is loaded automatically. Use <code>-ResetCredentials</code> to force a new prompt.</p>
+<!-- /wp:paragraph -->
+
+<!-- wp:separator -->
+<hr class="wp-block-separator"/>
+<!-- /wp:separator -->
+
+<!-- wp:heading -->
+<h2>Export file format</h2>
+<!-- /wp:heading -->
+
+<!-- wp:paragraph -->
+<p>Each exported role is a self-contained JSON file:</p>
+<!-- /wp:paragraph -->
+
+<!-- wp:code -->
+<pre class="wp-block-code"><code>{
+  "ExportedFrom": "vc01.vcf.lab",
+  "ExportedAt": "2026-03-31 14:57:00",
+  "ScriptVersion": "1.2.3",
+  "RoleName": "TanzuUser",
+  "Description": "",
+  "PrivilegeCount": 6,
+  "Privileges": [
+    "Namespaces.Configure",
+    "Namespaces.Manage",
+    "SupervisorServices.Manage",
+    "VirtualMachine.Interact.ConsoleInteract",
+    "VirtualMachine.Interact.PowerOff",
+    "VirtualMachine.Interact.PowerOn"
+  ]
+}</code></pre>
+<!-- /wp:code -->
+
+<!-- wp:paragraph -->
+<p>The file is readable and auditable without any tooling. You can diff two exports, put them in version control, or attach them to a change request.</p>
+<!-- /wp:paragraph -->
+
+<!-- wp:separator -->
+<hr class="wp-block-separator"/>
+<!-- /wp:separator -->
+
+<!-- wp:heading -->
+<h2>A note on missing privileges</h2>
+<!-- /wp:heading -->
+
+<!-- wp:paragraph -->
+<p>If a privilege ID in the export file does not exist on the target vCenter — because it was introduced in a later release, removed, or renamed — the script reports it and continues:</p>
+<!-- /wp:paragraph -->
+
+<!-- wp:code -->
+<pre class="wp-block-code"><code>  [WARN] Privilege 'Some.Removed.Privilege' not found on vc02.vcf.lab — skipped.
+  [OK]   Role 'TanzuUser' created with 5 of 6 privileges.</code></pre>
+<!-- /wp:code -->
+
+<!-- wp:paragraph -->
+<p>The role is still created with whatever privileges could be resolved. You decide whether the skipped ones matter.</p>
+<!-- /wp:paragraph -->
+
+<!-- wp:separator -->
+<hr class="wp-block-separator"/>
+<!-- /wp:separator -->
+
+<!-- wp:heading -->
+<h2>Download</h2>
+<!-- /wp:heading -->
+
+<!-- wp:paragraph -->
+<p>The script is available on GitHub: <a href="https://github.com/pauldiee/VIRoleManager" target="_blank" rel="noreferrer noopener"><strong>pauldiee/VIRoleManager</strong></a></p>
+<!-- /wp:paragraph -->
+
+<!-- wp:paragraph -->
+<p>Current version: 1.2.3</p>
+<!-- /wp:paragraph -->
+
+<!-- wp:separator -->
+<hr class="wp-block-separator"/>
+<!-- /wp:separator -->
+
+<!-- wp:paragraph -->
+<p><em>Questions or issues? Drop a comment below or open an issue on GitHub.</em></p>
+<!-- /wp:paragraph -->
