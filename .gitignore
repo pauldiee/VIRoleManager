@@ -1,3 +1,14 @@
 # Blog post drafts (local only)
 blogpost*.html
 blogpost*.md
+
+# Credentials - never commit
+*.cred
+creds/
+
+# Exported roles (runtime output)
+*.json
+
+# Logs / temp
+*.log
+*.tmp
