@@ -101,6 +101,18 @@ Each exported role is a JSON file with the following structure:
 
 ---
 
+## Testing in a lab
+
+`tests/New-VIRoleTestSet.ps1` builds a set of test roles in a **lab** vCenter (`-Mode Create`), each a case an export/import has to handle: `VIRM-T-Operator` (a few VM privileges), `VIRM-T-Legacy` (privileges that exist on vCenter 8.0.3 but not on 9.1.1), `VIRM-T-Empty` (System privileges only), `VIRM-T-AllVM` (every `VirtualMachine.*` privilege) and `VIRM-T Ops & Support (L2)` (spaces, `&` and brackets in the name). `-Mode Show` lists them with their privilege counts; `-Mode Remove` deletes the ones no permission uses. It only touches `VIRM-T*` roles and reads the same `.cred` file as the main script.
+
+Suggested run: Create on the source, Export each role with `-RoleName`, Import on the target, Show on both sides, Remove.
+
+Lab findings (vCenter 8.0.3 build 25600417 to 9.1.1 build 25784172, 2026-11-16, clean `pwsh -NoProfile`):
+
+- All five roles imported with the same privileges, the name with special characters included.
+- vCenter 8.0.3 has four privileges that 9.1.1 doesn't: `vSphereClient.UtilizeVerificationCode`, `IntercomNamespace.Read`, `IntercomNamespace.Write`, `Observability.Admin`. The import skips them and says so (*"4 privilege(s) not found in target vCenter and will be skipped"*).
+- On VCF 9.1.1 every custom role gets a permission on the vCenter root for a `VSPHERE.LOCAL\vcf_reserved_<n>` principal, so `-Mode Remove` keeps the roles there; the script leaves that permission alone.
+
 ## Author
 
 Paul van Dieen — [hollebollevsan.nl](https://www.hollebollevsan.nl)
