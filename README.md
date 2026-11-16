@@ -4,7 +4,7 @@ A PowerShell utility to export and import vCenter roles and their privilege assi
 
 | Script | Version | Purpose |
 |---|---|---|
-| `Invoke-VIRoleManager.ps1` | 1.2.3 | Export / import vCenter roles — **vSphere 9 only** |
+| `Invoke-VIRoleManager.ps1` | 1.3.0 | Export / import vCenter roles — **vSphere 9 only** |
 
 ---
 
@@ -17,7 +17,7 @@ A PowerShell utility to export and import vCenter roles and their privilege assi
 
 | Requirement | Notes |
 |---|---|
-| PowerShell 5.1+ | Included with Windows 10 / Server 2016 and later |
+| PowerShell 7.4+ | VCF.PowerCLI 9.x needs PowerShell 7 ([KB 409981](https://knowledge.broadcom.com/external/article/409981)); Windows ships 5.1, so start the script from `pwsh` |
 | VCF.PowerCLI 9.0+ or VMware.PowerCLI 13+ | `Install-Module -Name VCF.PowerCLI -Scope CurrentUser` |
 | Network access | HTTPS to vCenter Server |
 
