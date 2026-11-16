@@ -21,6 +21,8 @@ A PowerShell utility to export and import vCenter roles and their privilege assi
 | VCF.PowerCLI 9.0+ or VMware.PowerCLI 13+ | `Install-Module -Name VCF.PowerCLI -Scope CurrentUser` |
 | Network access | HTTPS to vCenter Server |
 
+Setting up PowerShell 7 and VCF.PowerCLI on a jump host, with or without internet access, and keeping one PowerCLI version per host: [Jump Host: PowerShell 7 and VCF PowerCLI](https://vcf-planning.hollebollevsan.nl/docs/42-jump-host-powershell/).
+
 ## Usage
 
 ```powershell
