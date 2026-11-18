@@ -4,7 +4,7 @@ A PowerShell utility to export and import vCenter roles and their privilege assi
 
 | Script | Version | Purpose |
 |---|---|---|
-| `Invoke-VIRoleManager.ps1` | 1.4.0 | Export / import vCenter roles — **vSphere 9 only** |
+| `Invoke-VIRoleManager.ps1` | 1.5.0 | Export / import vCenter roles — **vSphere 9 only** |
 
 ---
 
@@ -59,7 +59,7 @@ Credentials are encrypted and saved as `<hostname>.cred` next to the script usin
 
 ## How a run goes
 
-Without `-Mode` a menu asks for Export or Import. Without `-FilePath` the script then asks for the folder: **Enter** keeps the script directory (the default), **B** opens the Windows folder browser (only where a GUI is available), or type a path. Import shows how many JSON files the folder holds and asks again when it holds none. An export with `-RoleName` doesn't ask. Everything the console shows also goes to `Logs\VIRoleManager_<timestamp>.log` next to the script (`-LogDirectory` to change it).
+Without `-Mode` a menu asks for Export or Import. Without `-FilePath` the script then asks for the folder: **Enter** keeps the script directory (the default), **B** opens the Windows folder browser (only where a GUI is available), or type a path. Import shows how many JSON files the folder holds and asks again when it holds none. An export with `-RoleName` doesn't ask. Everything the console shows also goes to `Logs\VIRoleManager_<timestamp>.log` next to the script (`-LogDirectory` to change it). Long steps show a progress bar with "n of N: item", the percentage and the time left; it disappears when the step ends.
 
 ## Interactive picker
 
