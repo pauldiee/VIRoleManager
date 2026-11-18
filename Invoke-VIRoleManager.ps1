@@ -80,12 +80,19 @@
 .NOTES
     Author   : Paul van Dieen
     Blog     : https://www.hollebollevsan.nl
-    Version  : 1.4.0
+    Version  : 1.5.0
     Requires : PowerShell 7.4+, VCF.PowerCLI 9.0+ (or VMware.PowerCLI 13+)
     Tested   : vSphere 9
 #>
 
 <# CHANGELOG
+    v1.5.0  2026-11-18  Paul van Dieen
+        - Progress bar during long steps (#12): "n of N: item", the
+          percentage and the time left, in the export and import per role,
+          and a second bar while the privileges of a role are looked up on
+          the target. Updated at most every 250 ms; the bar disappears when
+          the step ends. The log file is unchanged
+
     v1.4.0  2026-11-18  Paul van Dieen
         - On par with VDSPortGroupManager 1.6.1 and VIFolderManager 1.3.0 (#10)
         - Log file: everything the console shows also goes to
@@ -188,7 +195,7 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$scriptVersion = '1.4.0'
+$scriptVersion = '1.5.0'
 $scriptAuthor  = 'Paul van Dieen'
 $scriptBlogUrl = 'https://www.hollebollevsan.nl'
 $scriptDir     = if ($PSScriptRoot) { $PSScriptRoot } else { (Get-Location).Path }
@@ -317,6 +324,49 @@ function Write-RunSummary {
         Write-Log "  Failed ($($mine.Count)):" -Level ERROR
         foreach ($f in $mine) { Write-Log "    - $($f.Name): $($f.Reason)" -Level ERROR }
     }
+}
+
+# --- Progress (#12) -------------------------------------------------------------
+# A progress bar per long step: "12 of 637: name", percentage and time left.
+# Updated at most every 250 ms, so thousands of items don't slow the run down;
+# Complete-Progress removes the bar. Id 1 is the outer step, Id 2 the items
+# inside it. The log file is unchanged.
+$script:ProgressState = @{}
+function Show-Progress {
+    param(
+        [Parameter(Mandatory = $true)][string]$Activity,
+        [Parameter(Mandatory = $true)][int]$Index,
+        [Parameter(Mandatory = $true)][int]$Total,
+        [string]$Item = '',
+        [int]$Id = 1,
+        [int]$ParentId = -1
+    )
+    if ($Total -le 0) { return }
+    $now = [DateTime]::UtcNow
+    if (-not $script:ProgressState.ContainsKey($Id) -or $Index -le 1) {
+        $script:ProgressState[$Id] = @{ Start = $now; Last = [DateTime]::MinValue }
+    }
+    $st = $script:ProgressState[$Id]
+    if ($Index -gt 1 -and $Index -lt $Total -and ($now - $st.Last).TotalMilliseconds -lt 250) { return }
+    $st.Last = $now
+    $p = @{
+        Id              = $Id
+        Activity        = $Activity
+        Status          = "$Index of $Total$(if ($Item) { ": $Item" })"
+        PercentComplete = [Math]::Min(100, [int](100 * ($Index - 1) / $Total))
+    }
+    if ($Index -gt 1) {
+        $perItem = ($now - $st.Start).TotalSeconds / ($Index - 1)
+        $p.SecondsRemaining = [int]($perItem * ($Total - $Index + 1))
+    }
+    if ($ParentId -ge 0) { $p.ParentId = $ParentId }
+    Write-Progress @p
+}
+
+function Complete-Progress {
+    param([int]$Id = 1)
+    $null = $script:ProgressState.Remove($Id)
+    Write-Progress -Id $Id -Activity 'Done' -Completed
 }
 
 # --- Menu Functions -------------------------------------------------------------
@@ -764,8 +814,11 @@ if ($Mode -eq 'Export') {
     if ($choices.Count -gt 0) {
         if (-not (Test-Path -Path $outDir)) { $null = New-Item -ItemType Directory -Path $outDir -Force }
         $exportOk = 0
+        $no = 0
         foreach ($choice in $choices) {
             $role = $choice.Item
+            $no++
+            Show-Progress -Activity 'Exporting roles' -Index $no -Total $choices.Count -Item $role.Name
             try {
                 $privileges = @($role.ExtensionData.Privilege)
                 $export = [PSCustomObject]@{
@@ -797,6 +850,7 @@ if ($Mode -eq 'Export') {
                 Add-RunFailure -Action 'Export' -Name $role.Name -Reason (Get-FailReason $_)
             }
         }
+        Complete-Progress
         $exportFail = @($script:RunFailures | Where-Object { $_.Action -eq 'Export' }).Count
         Write-RunSummary -Line "Export complete: $exportOk role(s) exported, $exportFail failed." -Failed $exportFail -Actions 'Export'
     } elseif ($items.Count -gt 0) {
@@ -845,7 +899,10 @@ if ($Mode -eq 'Import') {
         Write-Log 'No files selected. Skipping import.' -Level WARNING
     } else {
         $created = 0; $skipped = 0; $partial = 0
+        $no = 0
         foreach ($file in $files) {
+            $no++
+            Show-Progress -Activity 'Importing roles' -Index $no -Total $files.Count -Item $file.Name
             try {
                 Write-Log "Reading $($file.Name) ..."
                 $import = Get-Content -Path $file.FullName -Raw -ErrorAction Stop | ConvertFrom-Json
@@ -863,7 +920,11 @@ if ($Mode -eq 'Import') {
                 # Resolve privileges, scoped to this vCenter only
                 $privsToAdd  = [System.Collections.Generic.List[object]]::new()
                 $skippedList = [System.Collections.Generic.List[string]]::new()
-                foreach ($privId in $import.Privileges) {
+                $privList = @($import.Privileges)
+                $privNo = 0
+                foreach ($privId in $privList) {
+                    $privNo++
+                    Show-Progress -Id 2 -ParentId 1 -Activity "Resolving the privileges of '$targetName'" -Index $privNo -Total $privList.Count -Item $privId
                     $priv = Get-VIPrivilege -Server $viConn -Id $privId -ErrorAction SilentlyContinue
                     if ($priv) { $privsToAdd.Add($priv) } else { $skippedList.Add($privId) }
                 }
@@ -884,6 +945,8 @@ if ($Mode -eq 'Import') {
                 Add-RunFailure -Action 'Import' -Name $file.Name -Reason (Get-FailReason $_)
             }
         }
+        Complete-Progress -Id 2
+        Complete-Progress
         $importFail = @($script:RunFailures | Where-Object { $_.Action -eq 'Import' }).Count
         Write-RunSummary -Line "Import complete: $created role(s) created ($partial with parts left out), $skipped skipped (already exists), $importFail failed." `
             -Failed $importFail -Skipped ($skipped + $partial) -Actions 'Import'
