@@ -13,19 +13,27 @@
     FQDN or IP of the vCenter Server.
 
 .PARAMETER Mode
-    'Export' to save a role to file, or 'Import' to create a role from file.
+    'Export' to save roles to files, or 'Import' to create roles from files.
+    If omitted, a menu is shown.
 
 .PARAMETER RoleName
-    Name of the role to export. Optional for Export mode — if omitted the script
-    lists all custom roles and prompts for interactive selection.
+    Export mode: one or more role names or wildcards (e.g. 'Ops*') to export
+    instead of the interactive picker. No match stops the script with the
+    list of custom roles and exit code 1.
 
 .PARAMETER FilePath
-    Path to a JSON file or directory.
-    - Export: output directory or file path. When exporting multiple roles,
-      must be a directory. Defaults to the script directory.
-    - Import: specific JSON file, or a directory to scan for JSON files.
-      If omitted, the script directory is scanned. When multiple files are
-      found an interactive picker is shown.
+    Path to a JSON file, a wildcard, or a directory.
+    - Export: output directory, or a file path when exporting one role.
+      Defaults to the script directory.
+    - Import: a JSON file, a wildcard (every matching file is imported), or a
+      directory to pick files from.
+    Without -FilePath an interactive run asks for the folder after the mode:
+    Enter keeps the script directory, B opens the Windows folder browser, or
+    type a path. No prompt for an export with -RoleName.
+
+.PARAMETER LogDirectory
+    Directory to write log files to. Defaults to a "Logs" subfolder next to
+    the script.
 
 .PARAMETER NewRoleName
     Name for the imported role. Defaults to the role name stored in the export
@@ -58,18 +66,49 @@
     .\Invoke-VIRoleManager.ps1 -vCenterServer vc02.lab.local -Mode Import -FilePath .\Custom_Ops_Role.json -NewRoleName "Ops Role v2"
 
 .EXAMPLE
+    # Unattended export of every role whose name starts with Ops, into a folder
+    .\Invoke-VIRoleManager.ps1 -vCenterServer vc01.lab.local -Mode Export -RoleName 'Ops*' -FilePath D:\migration\roles
+
+.EXAMPLE
+    # Import every role export in a folder without the picker
+    .\Invoke-VIRoleManager.ps1 -vCenterServer vc02.lab.local -Mode Import -FilePath 'D:\migration\roles\*.json'
+
+.EXAMPLE
     # Lab environment with self-signed certificate
     .\Invoke-VIRoleManager.ps1 -vCenterServer vc01.lab.local -Mode Export -SkipCertificateValidation
 
 .NOTES
     Author   : Paul van Dieen
     Blog     : https://www.hollebollevsan.nl
-    Version  : 1.3.1
+    Version  : 1.4.0
     Requires : PowerShell 7.4+, VCF.PowerCLI 9.0+ (or VMware.PowerCLI 13+)
     Tested   : vSphere 9
 #>
 
 <# CHANGELOG
+    v1.4.0  2026-11-18  Paul van Dieen
+        - On par with VDSPortGroupManager 1.6.1 and VIFolderManager 1.3.0 (#10)
+        - Log file: everything the console shows also goes to
+          Logs\VIRoleManager_<timestamp>.log next to the script (new
+          -LogDirectory)
+        - -Mode is optional: without it a menu asks for Export or Import
+        - Without -FilePath an interactive run asks for the folder after the
+          mode: Enter keeps the script directory (the default, as before), B
+          opens the Windows folder browser, or type a path; Import shows how
+          many JSON files the folder holds. -FilePath works as before, and
+          also takes a wildcard on Import (every match is imported)
+        - -RoleName takes several names or wildcards (unattended export of
+          a set of roles); no match stops with the list of custom roles
+        - Pickers: numbers, ranges (2-6), combinations, 'all', a name filter
+          (*text* or /text, renumbered), 'list'/'reset', long lists
+          shortened; cancel with cancel, exit, quit or q
+        - Failures stand out: a role that fails to export or import is a red
+          FAILED line with the vCenter message; the summary is red with
+          failures, yellow with only skips (role already exists, privileges
+          left out), green otherwise, and lists every failure. A run with
+          failures ends with exit code 1 (was always 0). Without console
+          input every prompt stops with a clear message and exit code 2
+
     v1.3.1  2026-11-18  Paul van Dieen
         - Get-Help shows the full help again: the changelog moved out of the
           help block into its own comment block (the unknown .CHANGELOG
@@ -136,10 +175,11 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory)][string]$vCenterServer,
-    [Parameter(Mandatory)][ValidateSet('Export','Import')][string]$Mode,
-    [string]$RoleName,
+    [ValidateSet('Export','Import')][string]$Mode = '',
+    [string[]]$RoleName = @(),
     [string]$FilePath,
     [string]$NewRoleName,
+    [string]$LogDirectory = '',
     [string]$CredentialPath,
     [switch]$SkipCertificateValidation,
     [switch]$ResetCredentials
@@ -148,7 +188,7 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$scriptVersion = '1.3.1'
+$scriptVersion = '1.4.0'
 $scriptAuthor  = 'Paul van Dieen'
 $scriptBlogUrl = 'https://www.hollebollevsan.nl'
 $scriptDir     = if ($PSScriptRoot) { $PSScriptRoot } else { (Get-Location).Path }
@@ -217,18 +257,453 @@ catch {
 }
 Write-Host "  [INFO] PowerCLI $(@(Get-Module -Name VMware.VimAutomation.Core)[0].Version) loaded." -ForegroundColor Cyan
 
+# --- Logging Setup --------------------------------------------------------------
+# (#10) Everything the console shows also goes to a timestamped log file.
+$scriptDirLogs = if ($LogDirectory) { $LogDirectory } else { Join-Path $scriptDir 'Logs' }
+if (-not (Test-Path -Path $scriptDirLogs)) { New-Item -ItemType Directory -Path $scriptDirLogs -Force | Out-Null }
+$timestamp = Get-Date -Format 'yyyy-MM-dd_HH-mm-ss'
+$LogFile   = Join-Path $scriptDirLogs "VIRoleManager_$timestamp.log"
+
+function Write-Log {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Message,
+        [Parameter(Mandatory = $false)]
+        [ValidateSet('INFO', 'SUCCESS', 'WARNING', 'ERROR')]
+        [string]$Level = 'INFO'
+    )
+    $ts    = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
+    $entry = "[$ts] [$Level] $Message"
+    Add-Content -Path $LogFile -Value $entry
+    switch ($Level) {
+        'SUCCESS' { Write-Host "  $entry" -ForegroundColor Green  }
+        'WARNING' { Write-Host "  $entry" -ForegroundColor Yellow }
+        'ERROR'   { Write-Host "  $entry" -ForegroundColor Red    }
+        default   { Write-Host "  $entry" -ForegroundColor Cyan   }
+    }
+}
+
+# --- Run results (#10, as VDSPortGroupManager #20) --------------------------------
+# Every role that fails to export or import is logged as an ERROR (red) and
+# collected, so the summary names them with the reason and the
+# run ends with exit code 1 (0 = no failures, 2 = stopped for lack of console
+# input).
+$script:RunFailures = [System.Collections.Generic.List[object]]::new()
+
+function Get-FailReason {
+    # The vCenter message without PowerShell's wrapper: 'Exception calling
+    # "CreateDVPortgroup" with "1" argument(s): "..."', or PowerCLI's
+    # tab-separated 'timestamp<TAB>cmdlet<TAB>detail'.
+    param($ErrorRecord)
+    $m = if ($ErrorRecord -is [System.Management.Automation.ErrorRecord]) { "$($ErrorRecord.Exception.Message)" } else { "$ErrorRecord" }
+    if ($m -match "`t") { $m = @($m -split "`t" | Where-Object { $_.Trim() })[-1].Trim() }
+    if ($m -match '^Exception calling "[^"]+" with "\d+" argument\(s\): "(.*)"$') { $m = $Matches[1] }
+    return $m.Trim()
+}
+
+function Add-RunFailure {
+    param([string]$Action, [string]$Name, [string]$Reason)
+    $script:RunFailures.Add([pscustomobject]@{ Action = $Action; Name = $Name; Reason = $Reason })
+    Write-Log "FAILED $($Action.ToLower()) '$Name': $Reason" -Level ERROR
+}
+
+function Write-RunSummary {
+    # One summary line, coloured by outcome, then the failures of these actions.
+    param([string]$Line, [int]$Failed, [int]$Skipped = 0, [string[]]$Actions = @())
+    $level = if ($Failed -gt 0) { 'ERROR' } elseif ($Skipped -gt 0) { 'WARNING' } else { 'SUCCESS' }
+    Write-Log $Line -Level $level
+    $mine = @($script:RunFailures | Where-Object { $Actions -contains $_.Action })
+    if ($mine.Count -gt 0) {
+        Write-Log "  Failed ($($mine.Count)):" -Level ERROR
+        foreach ($f in $mine) { Write-Log "    - $($f.Name): $($f.Reason)" -Level ERROR }
+    }
+}
+
+# --- Menu Functions -------------------------------------------------------------
+# Long lists: above $PickerListMax items the picker shows a count and a few
+# examples and asks for a filter first; above $PickerEchoMax selected items
+# the confirmation shows the count plus the first and last few (#4).
+$PickerListMax = 50
+$PickerEchoMax = 20
+
+# Words that abort a picker or prompt (#13); -in is case-insensitive.
+$CancelWords = @('cancel', 'exit', 'quit', 'q')
+function Test-CancelInput {
+    param([string]$Text)
+    return ($Text -in $CancelWords)
+}
+
+# Every prompt goes through Read-Input (#11): without console input (a
+# scheduled task, CI, pwsh -NonInteractive, redirected stdin) Read-Host
+# throws or returns $null; stop with a clear message instead of a
+# null-valued-expression error.
+function Stop-NoConsoleInput {
+    param([string]$Prompt)
+    Write-Host "`n  [ERROR] No console input available (unattended run?). The script asked: $($Prompt.Trim())" -ForegroundColor Red
+    Write-Host '  Pass the choices as parameters instead: -Mode, -RoleName (Export) or -FilePath (Import), and' -ForegroundColor Yellow
+    Write-Host '  -FilePath for the folder. Save the credential first with one interactive run.' -ForegroundColor Yellow
+    $conn = Get-Variable -Name viConn -Scope Script -ValueOnly -ErrorAction SilentlyContinue
+    if ($conn) { Disconnect-VIServer -Server $conn -Confirm:$false -ErrorAction SilentlyContinue }
+    exit 2
+}
+
+function Read-Input {
+    param([string]$Prompt, [switch]$AsSecureString)
+    try {
+        $value = if ($AsSecureString) { Read-Host $Prompt -AsSecureString } else { Read-Host $Prompt }
+    }
+    catch {
+        $value = $null
+    }
+    if ($null -eq $value) { Stop-NoConsoleInput -Prompt $Prompt }
+    if ($AsSecureString) { return $value }
+    return $value.Trim()
+}
+
+function Write-ItemList {
+    param([array]$Items, [string]$DisplayProperty, [switch]$Full)
+    $width = "$($Items.Count)".Length
+    $fmt   = '  [{0,' + $width + '}]  {1}'
+    if ($Full -or $Items.Count -le $PickerListMax) {
+        for ($i = 0; $i -lt $Items.Count; $i++) { Write-Host ($fmt -f ($i + 1), $Items[$i].$DisplayProperty) }
+        return
+    }
+    for ($i = 0; $i -lt 5; $i++) { Write-Host ($fmt -f ($i + 1), $Items[$i].$DisplayProperty) }
+    Write-Host ('  ' + (' ' * ($width + 2)) + "  ... $($Items.Count - 10) more ...") -ForegroundColor DarkGray
+    for ($i = $Items.Count - 5; $i -lt $Items.Count; $i++) { Write-Host ($fmt -f ($i + 1), $Items[$i].$DisplayProperty) }
+    Write-Host "`n  $($Items.Count) items: too many to list. Narrow the list with a filter, or type 'list' to show them all." -ForegroundColor Yellow
+}
+
+function Write-SelectionSummary {
+    param([array]$Selected, [string]$DisplayProperty)
+    Write-Host "`n  Selected $($Selected.Count) item(s):" -ForegroundColor Green
+    if ($Selected.Count -le $PickerEchoMax) {
+        $Selected | ForEach-Object { Write-Host "    - $($_.$DisplayProperty)" -ForegroundColor White }
+    }
+    else {
+        $Selected[0..4] | ForEach-Object { Write-Host "    - $($_.$DisplayProperty)" -ForegroundColor White }
+        Write-Host "    ... $($Selected.Count - 10) more ..." -ForegroundColor DarkGray
+        $Selected[($Selected.Count - 5)..($Selected.Count - 1)] | ForEach-Object { Write-Host "    - $($_.$DisplayProperty)" -ForegroundColor White }
+    }
+    Write-Host ''
+}
+
+function Select-ItemsByName {
+    # Non-interactive selection by name: every item
+    # whose name matches one of the patterns (names or wildcards, -like).
+    param(
+        [Parameter(Mandatory = $true)][array]$Items,
+        [Parameter(Mandatory = $true)][string]$NameProperty,
+        [Parameter(Mandatory = $true)][string]$DisplayProperty,
+        [Parameter(Mandatory = $true)][string[]]$Patterns,
+        [string]$What = 'item'
+    )
+    $selected = [System.Collections.Generic.List[object]]::new()
+    foreach ($pattern in $Patterns) {
+        $hits = @($Items | Where-Object { $_.$NameProperty -like $pattern })
+        if ($hits.Count -eq 0) {
+            Write-Log "No $What matches '$pattern'." -Level WARNING
+        }
+        foreach ($hit in $hits) { if (-not $selected.Contains($hit)) { $selected.Add($hit) } }
+    }
+    if ($selected.Count -gt 0) {
+        Write-Log "Selected $($selected.Count) $What(s) by name: $($Patterns -join ', ')"
+        Write-SelectionSummary -Selected @($selected) -DisplayProperty $DisplayProperty
+    }
+    return @($selected)
+}
+
+function Select-MultipleItems {
+    param(
+        [Parameter(Mandatory = $true)][array]$Items,
+        [Parameter(Mandatory = $true)][string]$DisplayProperty,
+        [Parameter(Mandatory = $true)][string]$Title,
+        # Property the filter matches on (defaults to the display text)
+        [string]$NameProperty = ''
+    )
+    if ($Items.Count -eq 0) {
+        Write-Host '  No items available to select.' -ForegroundColor Yellow
+        return @()
+    }
+    if (-not $NameProperty) { $NameProperty = $DisplayProperty }
+    $view   = $Items
+    $filter = ''
+    Write-Host "`n  $Title" -ForegroundColor Cyan
+    Write-ItemList -Items $view -DisplayProperty $DisplayProperty
+    Write-Host "`n  Enter numbers (e.g. 1,3,5), a range (e.g. 2-6), a combination (e.g. 1,3-5,8)," -ForegroundColor Gray
+    Write-Host "  'all' to select every item shown, or 'cancel' (or exit, quit, q) to abort." -ForegroundColor Gray
+    Write-Host "  Filter by name: a wildcard (e.g. *prod*) or /text for a substring; 'reset' clears" -ForegroundColor Gray
+    Write-Host "  the filter, 'list' shows every item in the current list.`n" -ForegroundColor Gray
+    while ($true) {
+        $prompt    = if ($filter) { "  Your selection (filter: $filter, $($view.Count) shown)" } else { '  Your selection' }
+        $userInput = Read-Input $prompt
+        if (Test-CancelInput $userInput) {
+            Write-Host '  Cancelled.' -ForegroundColor Yellow
+            return @()
+        }
+        if ($userInput -eq 'list') {
+            Write-ItemList -Items $view -DisplayProperty $DisplayProperty -Full
+            continue
+        }
+        if ($userInput -eq 'reset' -or ($userInput -eq '' -and $filter)) {
+            $view = $Items; $filter = ''
+            Write-Host "`n  Filter cleared: $($view.Count) item(s)." -ForegroundColor Cyan
+            Write-ItemList -Items $view -DisplayProperty $DisplayProperty
+            continue
+        }
+        if ($userInput -match '[*?]' -or $userInput.StartsWith('/')) {
+            $pattern = if ($userInput.StartsWith('/')) { '*' + [WildcardPattern]::Escape($userInput.Substring(1)) + '*' } else { $userInput }
+            $hits    = @($Items | Where-Object { $_.$NameProperty -like $pattern })
+            if ($hits.Count -eq 0) {
+                Write-Host "  Nothing matches '$userInput'; the list is unchanged." -ForegroundColor Yellow
+                continue
+            }
+            $view = $hits; $filter = $userInput
+            Write-Host "`n  Filter '$filter': $($view.Count) of $($Items.Count) item(s), renumbered." -ForegroundColor Cyan
+            Write-ItemList -Items $view -DisplayProperty $DisplayProperty
+            continue
+        }
+        if ($userInput -eq '') { continue }
+        if ($userInput -eq 'all') {
+            if ($view.Count -gt $PickerListMax -and -not $filter) {
+                Write-Host "  'all' selects all $($view.Count) item(s)." -ForegroundColor Yellow
+            }
+            Write-SelectionSummary -Selected $view -DisplayProperty $DisplayProperty
+            return $view
+        }
+        $selectedIndices = @()
+        $parts           = $userInput -split ','
+        $parseError      = $false
+        foreach ($part in $parts) {
+            $part = $part.Trim()
+            if ($part -match '^\d+$') {
+                $selectedIndices += [int]$part
+            }
+            elseif ($part -match '^(\d+)-(\d+)$') {
+                $start = [int]$Matches[1]
+                $end   = [int]$Matches[2]
+                if ($start -gt $end) {
+                    Write-Host "  Invalid range: $part (start must be equal to or less than end)." -ForegroundColor Red
+                    $parseError = $true
+                    break
+                }
+                $selectedIndices += $start..$end
+            }
+            else {
+                Write-Host "  Unrecognised input: '$part'. Use numbers, ranges like 2-5, 'all', or a filter (*text* or /text)." -ForegroundColor Red
+                $parseError = $true
+                break
+            }
+        }
+        if ($parseError) { continue }
+        $selectedIndices = $selectedIndices | Sort-Object -Unique
+        $invalid         = $selectedIndices | Where-Object { $_ -lt 1 -or $_ -gt $view.Count }
+        if ($invalid) {
+            Write-Host "  Out-of-range: $($invalid -join ', '). Valid range is 1-$($view.Count)." -ForegroundColor Red
+            continue
+        }
+        $selected = @($selectedIndices | ForEach-Object { $view[$_ - 1] })
+        Write-SelectionSummary -Selected $selected -DisplayProperty $DisplayProperty
+        return $selected
+    }
+}
+
+function Select-SingleItem {
+    # One item. With -Filter the list can be narrowed like the multi picker
+    # (wildcard or /text, 'reset', 'list'); used for the export file list,
+    # which grows with every export (#10).
+    param(
+        [Parameter(Mandatory = $true)][array]$Items,
+        [Parameter(Mandatory = $true)][string]$DisplayProperty,
+        [Parameter(Mandatory = $true)][string]$Title,
+        [switch]$Filter
+    )
+    if ($Items.Count -eq 0) {
+        Write-Host '  No items available to select.' -ForegroundColor Yellow
+        return $null
+    }
+    $view = $Items
+    $flt  = ''
+    Write-Host "`n  $Title" -ForegroundColor Cyan
+    if ($Filter) { Write-ItemList -Items $view -DisplayProperty $DisplayProperty }
+    else { Write-ItemList -Items $view -DisplayProperty $DisplayProperty -Full }
+    Write-Host "`n  Enter a number to select one item, or 'cancel' (or exit, quit, q) to abort." -ForegroundColor Gray
+    if ($Filter) {
+        Write-Host "  Filter by name: a wildcard (e.g. *prod*) or /text for a substring; 'reset' clears" -ForegroundColor Gray
+        Write-Host "  the filter, 'list' shows every item in the current list." -ForegroundColor Gray
+    }
+    Write-Host ''
+    while ($true) {
+        $prompt    = if ($flt) { "  Your selection (filter: $flt, $($view.Count) shown)" } else { '  Your selection' }
+        $userInput = Read-Input $prompt
+        if (Test-CancelInput $userInput) {
+            Write-Host '  Cancelled.' -ForegroundColor Yellow
+            return $null
+        }
+        if ($Filter -and $userInput -eq 'list') {
+            Write-ItemList -Items $view -DisplayProperty $DisplayProperty -Full
+            continue
+        }
+        if ($Filter -and ($userInput -eq 'reset' -or ($userInput -eq '' -and $flt))) {
+            $view = $Items; $flt = ''
+            Write-Host "`n  Filter cleared: $($view.Count) item(s)." -ForegroundColor Cyan
+            Write-ItemList -Items $view -DisplayProperty $DisplayProperty
+            continue
+        }
+        if ($Filter -and ($userInput -match '[*?]' -or $userInput.StartsWith('/'))) {
+            $pattern = if ($userInput.StartsWith('/')) { '*' + [WildcardPattern]::Escape($userInput.Substring(1)) + '*' } else { $userInput }
+            $hits    = @($Items | Where-Object { $_.$DisplayProperty -like $pattern })
+            if ($hits.Count -eq 0) {
+                Write-Host "  Nothing matches '$userInput'; the list is unchanged." -ForegroundColor Yellow
+                continue
+            }
+            $view = $hits; $flt = $userInput
+            Write-Host "`n  Filter '$flt': $($view.Count) of $($Items.Count) item(s), renumbered." -ForegroundColor Cyan
+            Write-ItemList -Items $view -DisplayProperty $DisplayProperty
+            continue
+        }
+        if ($userInput -match '^\d+$') {
+            $index = [int]$userInput
+            if ($index -ge 1 -and $index -le $view.Count) {
+                $selected = $view[$index - 1]
+                Write-Host "`n  Selected: $($selected.$DisplayProperty)`n" -ForegroundColor Green
+                return $selected
+            }
+        }
+        Write-Host "  Invalid selection. Enter a number between 1 and $($view.Count)." -ForegroundColor Red
+    }
+}
+
+function Select-FolderTypes {
+    param([string[]]$Available = @($folderTypeMap.Keys))
+    $items = @($Available | ForEach-Object { [pscustomobject]@{ Label = "$_ folders"; Value = $_ } })
+    $choice = Select-MultipleItems -Items $items -DisplayProperty 'Label' -Title 'Select folder types'
+    return @($choice | ForEach-Object { $_.Value })
+}
+
+# --- Interactive Mode Menu ------------------------------------------------------
+if (-not $Mode) {
+    $modeOptions = @(
+        [pscustomobject]@{ Label = 'Export  - save roles to JSON files'; Value = 'Export' }
+        [pscustomobject]@{ Label = 'Import  - create roles from JSON files'; Value = 'Import' }
+    )
+    $modeChoice = Select-SingleItem -Items $modeOptions -DisplayProperty 'Label' -Title 'Select operation mode'
+    if (-not $modeChoice) {
+        Write-Host '  No mode selected. Exiting.' -ForegroundColor Yellow
+        exit 0
+    }
+    $Mode = $modeChoice.Value
+}
+if ($RoleName.Count -gt 0 -and $Mode -ne 'Export') {
+    Write-Host '  [WARN] -RoleName only applies in Export mode and will be ignored.' -ForegroundColor Yellow
+}
+if ($NewRoleName -and $Mode -ne 'Import') {
+    Write-Host '  [WARN] -NewRoleName only applies in Import mode and will be ignored.' -ForegroundColor Yellow
+}
+
+# --- Folder (#10, as VDSPortGroupManager #18) ---------------------------------------
+# Without -FilePath an interactive run asks for the folder: Enter keeps the
+# script folder (the default, as before), B opens the Windows folder browser,
+# or type a path. No prompt with -FilePath, or for an export with -RoleName.
+function Test-FolderDialogAvailable {
+    if (-not $IsWindows) { return $false }
+    if (-not [Environment]::UserInteractive) { return $false }
+    if ([Threading.Thread]::CurrentThread.GetApartmentState() -ne 'STA') { return $false }
+    try { Add-Type -AssemblyName System.Windows.Forms -ErrorAction Stop; return $true }
+    catch { return $false }
+}
+
+function Select-FolderDialog {
+    param([string]$Description, [string]$StartPath)
+    $dialog = [System.Windows.Forms.FolderBrowserDialog]::new()
+    $dialog.Description = $Description
+    $dialog.UseDescriptionForTitle = $true
+    $dialog.ShowNewFolderButton = $true
+    if ($StartPath -and (Test-Path -Path $StartPath -PathType Container)) { $dialog.SelectedPath = (Resolve-Path $StartPath).Path }
+    # A hidden top-most owner keeps the dialog in front of the console window.
+    $owner = [System.Windows.Forms.Form]::new()
+    $owner.TopMost = $true
+    $owner.ShowInTaskbar = $false
+    $owner.WindowState = 'Minimized'
+    try {
+        if ($dialog.ShowDialog($owner) -eq [System.Windows.Forms.DialogResult]::OK) { return $dialog.SelectedPath }
+        return $null
+    }
+    finally {
+        $dialog.Dispose()
+        $owner.Dispose()
+    }
+}
+
+function Get-BackupCount {
+    param([string]$Path)
+    return @(Get-ChildItem -Path $Path -Filter '*.json' -File -ErrorAction SilentlyContinue).Count
+}
+
+function Get-BackupCount {
+    param([string]$Path)
+    return @(Get-ChildItem -Path $Path -Filter '*.json' -File -ErrorAction SilentlyContinue).Count
+}
+
+if (-not $FilePath -and -not ($Mode -eq 'Export' -and $RoleName.Count -gt 0)) {
+    $folder    = $scriptDir
+    $canBrowse = Test-FolderDialogAvailable
+    $purpose   = if ($Mode -eq 'Import') { 'to import from' } else { 'to export to' }
+    while ($true) {
+        Write-Host "`n  Folder ${purpose}:" -ForegroundColor Cyan
+        Write-Host "    $folder"
+        if ($Mode -eq 'Import' -and (Test-Path -Path $folder -PathType Container)) {
+            Write-Host "    ($(Get-BackupCount $folder) JSON file(s) here)" -ForegroundColor DarkGray
+        }
+        $hint = if ($canBrowse) { "  [Enter] use it, [B] browse, or type a path ('q' to quit)" } else { "  [Enter] use it, or type a path ('q' to quit)" }
+        $answer = Read-Input $hint
+        if (Test-CancelInput $answer) {
+            Write-Host '  Cancelled.' -ForegroundColor Yellow
+            exit 0
+        }
+        $candidate = $folder
+        if ($canBrowse -and $answer -match '^[Bb]$') {
+            $picked = Select-FolderDialog -Description 'Select the folder with the role exports (.json)' -StartPath $folder
+            if (-not $picked) { Write-Host '  No folder chosen.' -ForegroundColor Yellow; continue }
+            $candidate = $picked
+        }
+        elseif ($answer) {
+            $candidate = $answer.Trim('"', "'")
+        }
+        if ($Mode -eq 'Import') {
+            if (-not (Test-Path -Path $candidate -PathType Container)) {
+                Write-Host "  Folder not found: $candidate" -ForegroundColor Red
+                continue
+            }
+            $count = Get-BackupCount $candidate
+            if ($count -eq 0) {
+                Write-Host "  No JSON files in $candidate. Choose another folder." -ForegroundColor Red
+                $folder = $candidate
+                continue
+            }
+            Write-Host "  [OK]   $count JSON file(s) in $candidate." -ForegroundColor Green
+        }
+        elseif (Test-Path -Path $candidate -PathType Leaf) {
+            Write-Host "  That is a file, not a folder: $candidate" -ForegroundColor Red
+            continue
+        }
+        $FilePath = $candidate
+        break
+    }
+}
+
 # --- Credential Management ----------------------------------------------------
 $safeVc = $vCenterServer -replace '[^\w\-.]', '_'
 if (-not $CredentialPath) { $CredentialPath = Join-Path $scriptDir "$safeVc.cred" }
 
 if ($ResetCredentials -or -not (Test-Path $CredentialPath)) {
     if ($ResetCredentials) {
-        Write-Host "  [WARN] -ResetCredentials specified — prompting for new credentials." -ForegroundColor Yellow
+        Write-Host '  [WARN] -ResetCredentials specified - prompting for new credentials.' -ForegroundColor Yellow
     } else {
-        Write-Host "  [INFO] No saved credentials found — prompting." -ForegroundColor Cyan
+        Write-Host '  [INFO] No saved credentials found - prompting.' -ForegroundColor Cyan
     }
-    $credUser   = Read-Host "  Username for $vCenterServer"
-    $credPass   = Read-Host "  Password" -AsSecureString
+    $credUser   = Read-Input "  Username for $vCenterServer"
+    $credPass   = Read-Input '  Password' -AsSecureString
     $credential = [System.Management.Automation.PSCredential]::new($credUser, $credPass)
     $credential | Export-Clixml -Path $CredentialPath
     Write-Host "  [OK]   Credentials saved to $CredentialPath." -ForegroundColor Green
@@ -238,15 +713,19 @@ if ($ResetCredentials -or -not (Test-Path $CredentialPath)) {
 }
 
 # --- Connect to vCenter -------------------------------------------------------
-Write-Host "  [INFO] Connecting to $vCenterServer..." -ForegroundColor Cyan
+Write-Log "===== VIRoleManager started (Mode: $Mode) ====="
+Write-Log "vCenter:  $vCenterServer"
+Write-Log "Folder:   $(if ($FilePath) { $FilePath } else { $scriptDir })"
+Write-Log "Log File: $LogFile"
+Write-Log "Connecting to $vCenterServer ..."
 try {
     $null = Set-PowerCLIConfiguration `
         -InvalidCertificateAction $(if ($SkipCertificateValidation) { 'Ignore' } else { 'Warn' }) `
         -Confirm:$false -Scope Session -WarningAction SilentlyContinue
     $viConn = Connect-VIServer -Server $vCenterServer -Credential $credential -ErrorAction Stop -WarningAction SilentlyContinue
-    Write-Host "  [OK]   Connected to $vCenterServer (version $($viConn.Version), build $($viConn.Build))." -ForegroundColor Green
+    Write-Log "Connected to $vCenterServer (version $($viConn.Version), build $($viConn.Build))." -Level SUCCESS
 } catch {
-    Write-Host "  [ERROR] Failed to connect to $vCenterServer`: $_" -ForegroundColor Red
+    Write-Log "Failed to connect to vCenter '$vCenterServer': $(Get-FailReason $_)" -Level ERROR
     exit 1
 }
 
@@ -254,100 +733,74 @@ try {
 # EXPORT
 # =============================================================================
 if ($Mode -eq 'Export') {
-    try {
-        # Resolve output directory
-        $outDir = if ($FilePath -and (Test-Path $FilePath -PathType Container)) {
-            $FilePath
-        } elseif ($FilePath -and -not [System.IO.Path]::GetExtension($FilePath)) {
-            $FilePath   # treat as directory even if it doesn't exist yet
-        } else {
-            $scriptDir
+    Write-Log '--- EXPORT MODE ---'
+    # -FilePath: a folder (existing, or a path without extension), or one file
+    # when a single role is exported; the script folder otherwise (as before)
+    $outDir = if ($FilePath -and (Test-Path $FilePath -PathType Container)) {
+        $FilePath
+    } elseif ($FilePath -and -not [System.IO.Path]::GetExtension($FilePath)) {
+        $FilePath
+    } else {
+        $scriptDir
+    }
+    $all = @(Get-VIRole -Server $viConn -ErrorAction Stop | Where-Object { -not $_.IsSystem } | Sort-Object Name)
+    $items = @($all | ForEach-Object {
+        [pscustomobject]@{ Label = ('{0,-45} ({1} privileges)' -f $_.Name, @($_.ExtensionData.Privilege).Count); Name = $_.Name; Item = $_ }
+    })
+    $choices = @()
+    if ($items.Count -eq 0) {
+        Write-Log "No custom roles found on $vCenterServer." -Level WARNING
+    } elseif ($RoleName.Count -gt 0) {
+        $choices = @(Select-ItemsByName -Items $items -NameProperty 'Name' -DisplayProperty 'Label' -Patterns $RoleName -What 'role')
+        if ($choices.Count -eq 0) {
+            Write-Log "No role matches -RoleName $($RoleName -join ', '). Roles on this vCenter: $(@($items | ForEach-Object { $_.Name }) -join ', ')" -Level ERROR
+            Disconnect-VIServer -Server $viConn -Confirm:$false -ErrorAction SilentlyContinue
+            exit 1
         }
+    } else {
+        $choices = @(Select-MultipleItems -Items $items -DisplayProperty 'Label' -NameProperty 'Name' -Title 'Roles on this vCenter: select the ones to EXPORT')
+    }
 
-        # Get all custom (non-system) roles — scope to this vCenter only
-        $allRoles = @(Get-VIRole -Server $viConn -ErrorAction Stop | Where-Object { -not $_.IsSystem } | Sort-Object Name)
-        if ($allRoles.Count -eq 0) {
-            Write-Host "  [WARN] No custom roles found on $vCenterServer." -ForegroundColor Yellow
-        } else {
-            # Determine which roles to export
-            $rolesToExport = [System.Collections.Generic.List[object]]::new()
-
-            if ($RoleName) {
-                # Non-interactive: -RoleName supplied directly
-                $match = $allRoles | Where-Object { $_.Name -eq $RoleName }
-                if (-not $match) {
-                    Write-Host "  [ERROR] Role '$RoleName' not found or is a system role." -ForegroundColor Red
-                    exit 1
+    if ($choices.Count -gt 0) {
+        if (-not (Test-Path -Path $outDir)) { $null = New-Item -ItemType Directory -Path $outDir -Force }
+        $exportOk = 0
+        foreach ($choice in $choices) {
+            $role = $choice.Item
+            try {
+                $privileges = @($role.ExtensionData.Privilege)
+                $export = [PSCustomObject]@{
+                    ExportedFrom   = $vCenterServer
+                    ExportedAt     = (Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
+                    ScriptVersion  = $scriptVersion
+                    RoleName       = $role.Name
+                    Description    = if ($role.Description) { $role.Description } else { '' }
+                    PrivilegeCount = $privileges.Count
+                    Privileges     = $privileges
                 }
-                $rolesToExport.Add($match)
-            } else {
-                # Interactive picker
-                Write-Host ""
-                Write-Host "  Custom roles on $vCenterServer`:" -ForegroundColor Cyan
-                Write-Host ""
-                for ($i = 0; $i -lt $allRoles.Count; $i++) {
-                    $privCount = $allRoles[$i].ExtensionData.Privilege.Count
-                    $line = '   [{0,2}]  {1,-45} ({2} privileges)' -f ($i + 1), $allRoles[$i].Name, $privCount
-                    Write-Host $line -ForegroundColor White
-                }
-                Write-Host ""
-                $selection = Read-Host "  Enter number(s) to export (comma-separated, or 'all')"
-                $selection = $selection.Trim()
 
-                if ($selection -ieq 'all') {
-                    foreach ($r in $allRoles) { $rolesToExport.Add($r) }
+                # -FilePath with an extension and one role: that file; otherwise the folder
+                $outFile = if ($FilePath -and $choices.Count -eq 1 -and [System.IO.Path]::GetExtension($FilePath) -ne '') {
+                    $FilePath
                 } else {
-                    foreach ($token in ($selection -split ',')) {
-                        $token = $token.Trim()
-                        $idx   = 0
-                        if ([int]::TryParse($token, [ref]$idx) -and $idx -ge 1 -and $idx -le $allRoles.Count) {
-                            $rolesToExport.Add($allRoles[$idx - 1])
-                        } else {
-                            Write-Host "  [WARN] '$token' is not a valid selection — skipped." -ForegroundColor Yellow
-                        }
-                    }
+                    $safeName = $role.Name -replace '[^\w\-]', '_'
+                    Join-Path $outDir "$safeName.json"
                 }
-            }
 
-            if ($rolesToExport.Count -eq 0) {
-                Write-Host "  [WARN] No roles selected." -ForegroundColor Yellow
-            } else {
-                Write-Host ""
-                foreach ($role in $rolesToExport) {
-                    try {
-                        $privileges = @($role.ExtensionData.Privilege)
-                        $export = [PSCustomObject]@{
-                            ExportedFrom   = $vCenterServer
-                            ExportedAt     = (Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
-                            ScriptVersion  = $scriptVersion
-                            RoleName       = $role.Name
-                            Description    = if ($role.Description) { $role.Description } else { '' }
-                            PrivilegeCount = $privileges.Count
-                            Privileges     = $privileges
-                        }
-
-                        # If -FilePath points to a single file and only one role — honour it; else use directory
-                        $outFile = if ($FilePath -and $rolesToExport.Count -eq 1 -and [System.IO.Path]::GetExtension($FilePath) -ne '') {
-                            $FilePath
-                        } else {
-                            $safeName = $role.Name -replace '[^\w\-]', '_'
-                            Join-Path $outDir "$safeName.json"
-                        }
-
-                        if (-not (Test-Path (Split-Path $outFile -Parent))) {
-                            $null = New-Item -ItemType Directory -Path (Split-Path $outFile -Parent) -Force
-                        }
-
-                        $export | ConvertTo-Json -Depth 5 | Out-File -FilePath $outFile -Encoding UTF8
-                        Write-Host "  [OK]   '$($role.Name)' — $($privileges.Count) privilege(s) — exported to: $outFile" -ForegroundColor Green
-                    } catch {
-                        Write-Host "  [ERROR] Failed to export '$($role.Name)': $_" -ForegroundColor Red
-                    }
+                if (-not (Test-Path (Split-Path $outFile -Parent))) {
+                    $null = New-Item -ItemType Directory -Path (Split-Path $outFile -Parent) -Force
                 }
+
+                $export | ConvertTo-Json -Depth 5 | Out-File -FilePath $outFile -Encoding UTF8
+                Write-Log "Exported '$($role.Name)', $($privileges.Count) privilege(s), to: $outFile" -Level SUCCESS
+                $exportOk++
+            } catch {
+                Add-RunFailure -Action 'Export' -Name $role.Name -Reason (Get-FailReason $_)
             }
         }
-    } catch {
-        Write-Host "  [ERROR] Export failed: $_" -ForegroundColor Red
+        $exportFail = @($script:RunFailures | Where-Object { $_.Action -eq 'Export' }).Count
+        Write-RunSummary -Line "Export complete: $exportOk role(s) exported, $exportFail failed." -Failed $exportFail -Actions 'Export'
+    } elseif ($items.Count -gt 0) {
+        Write-Log 'Nothing selected. Skipping export.' -Level WARNING
     }
 }
 
@@ -355,118 +808,95 @@ if ($Mode -eq 'Export') {
 # IMPORT
 # =============================================================================
 if ($Mode -eq 'Import') {
-    try {
-        # Resolve search directory and build list of JSON files to pick from
-        $searchDir = if ($FilePath -and (Test-Path $FilePath -PathType Container)) {
-            $FilePath
-        } elseif ($FilePath -and [System.IO.Path]::GetExtension($FilePath) -ne '') {
-            $null   # specific file supplied — skip picker
+    Write-Log '--- IMPORT MODE ---'
+    # -FilePath: a file, a wildcard (every match is imported), or a folder to
+    # pick from; the script folder when omitted (as before)
+    $files = @()
+    if ($FilePath -and (Test-Path $FilePath -PathType Container)) {
+        $json = @(Get-ChildItem -Path $FilePath -Filter '*.json' -File | Sort-Object Name)
+        if ($json.Count -eq 0) {
+            Write-Log "No JSON files found in $FilePath." -Level WARNING
+        } elseif ($json.Count -eq 1) {
+            Write-Log "Found 1 file: $($json[0].Name)"
+            $files = @($json[0])
         } else {
-            $scriptDir
-        }
-
-        $filesToImport = [System.Collections.Generic.List[string]]::new()
-
-        if ($null -eq $searchDir) {
-            # Non-interactive: single file supplied directly
-            $filesToImport.Add($FilePath)
-        } else {
-            $jsonFiles = @(Get-ChildItem -Path $searchDir -Filter '*.json' -File | Sort-Object Name)
-            if ($jsonFiles.Count -eq 0) {
-                Write-Host "  [WARN] No JSON files found in $searchDir." -ForegroundColor Yellow
-            } elseif ($jsonFiles.Count -eq 1) {
-                # Only one file — use it without prompting
-                Write-Host "  [INFO] Found 1 file: $($jsonFiles[0].Name)" -ForegroundColor Cyan
-                $filesToImport.Add($jsonFiles[0].FullName)
-            } else {
-                # Interactive picker
-                Write-Host ""
-                Write-Host "  JSON files in $searchDir`:" -ForegroundColor Cyan
-                Write-Host ""
-                for ($i = 0; $i -lt $jsonFiles.Count; $i++) {
-                    # Peek at role name inside the file
-                    try {
-                        $peek     = Get-Content $jsonFiles[$i].FullName -Raw | ConvertFrom-Json
-                        $roleName = if ($peek.PSObject.Properties['RoleName']) { $peek.RoleName } else { '?' }
-                        $privCnt  = if ($peek.PSObject.Properties['PrivilegeCount']) { $peek.PrivilegeCount } else { '?' }
-                        $line = '   [{0,2}]  {1,-35} role: {2,-30} ({3} privileges)' -f ($i + 1), $jsonFiles[$i].Name, $roleName, $privCnt
-                    } catch {
-                        $line = '   [{0,2}]  {1}' -f ($i + 1), $jsonFiles[$i].Name
-                    }
-                    Write-Host $line -ForegroundColor White
-                }
-                Write-Host ""
-                $selection = Read-Host "  Enter number(s) to import (comma-separated, or 'all')"
-                $selection = $selection.Trim()
-
-                if ($selection -ieq 'all') {
-                    foreach ($f in $jsonFiles) { $filesToImport.Add($f.FullName) }
-                } else {
-                    foreach ($token in ($selection -split ',')) {
-                        $token = $token.Trim()
-                        $idx   = 0
-                        if ([int]::TryParse($token, [ref]$idx) -and $idx -ge 1 -and $idx -le $jsonFiles.Count) {
-                            $filesToImport.Add($jsonFiles[$idx - 1].FullName)
-                        } else {
-                            Write-Host "  [WARN] '$token' is not a valid selection — skipped." -ForegroundColor Yellow
-                        }
-                    }
-                }
-            }
-        }
-
-        if ($filesToImport.Count -eq 0) {
-            Write-Host "  [WARN] No files selected." -ForegroundColor Yellow
-        } else {
-            Write-Host ""
-            foreach ($file in $filesToImport) {
+            $fileItems = @($json | ForEach-Object {
+                $label = $_.Name
                 try {
-                    Write-Host "  [INFO] Reading $file..." -ForegroundColor Cyan
-                    $import = Get-Content -Path $file -Raw -ErrorAction Stop | ConvertFrom-Json
+                    $peek = Get-Content $_.FullName -Raw | ConvertFrom-Json
+                    $peekName = if ($peek.PSObject.Properties['RoleName']) { $peek.RoleName } else { '?' }
+                    $peekInfo = if ($peek.PSObject.Properties['PrivilegeCount']) { "$($peek.PrivilegeCount) privileges" } else { '?' }
+                    $label = '{0,-35} role: {1,-30} ({2})' -f $_.Name, $peekName, $peekInfo
+                } catch { }
+                [pscustomobject]@{ Label = $label; Name = $_.Name; Item = $_ }
+            })
+            $files = @(Select-MultipleItems -Items $fileItems -DisplayProperty 'Label' -NameProperty 'Name' -Title "JSON files in $FilePath`: select the ones to IMPORT" | ForEach-Object { $_.Item })
+        }
+    } else {
+        $files = @(Get-ChildItem -Path $FilePath -File -ErrorAction SilentlyContinue | Sort-Object Name)
+        if ($files.Count -eq 0) {
+            Write-Log "-FilePath not found: $FilePath" -Level ERROR
+            Disconnect-VIServer -Server $viConn -Confirm:$false -ErrorAction SilentlyContinue
+            exit 1
+        }
+    }
 
-                    # -NewRoleName only applies when importing a single file
-                    $targetName = if ($NewRoleName -and $filesToImport.Count -eq 1) { $NewRoleName } else { $import.RoleName }
-                    Write-Host "  [INFO] Importing as '$targetName' ($($import.Privileges.Count) privilege(s), exported from $($import.ExportedFrom) on $($import.ExportedAt))." -ForegroundColor Cyan
+    if ($files.Count -eq 0) {
+        Write-Log 'No files selected. Skipping import.' -Level WARNING
+    } else {
+        $created = 0; $skipped = 0; $partial = 0
+        foreach ($file in $files) {
+            try {
+                Write-Log "Reading $($file.Name) ..."
+                $import = Get-Content -Path $file.FullName -Raw -ErrorAction Stop | ConvertFrom-Json
+                # -NewRoleName only applies when importing a single file
+                $targetName = if ($NewRoleName -and $files.Count -eq 1) { $NewRoleName } else { $import.RoleName }
+                Write-Log "Importing '$($import.RoleName)' as '$targetName' ($(@($import.Privileges).Count) privilege(s), exported from $($import.ExportedFrom) on $($import.ExportedAt))."
 
-                    # Check for existing role — scope to this vCenter only
-                    $existing = Get-VIRole -Server $viConn -Name $targetName -ErrorAction SilentlyContinue
-                    if ($existing) {
-                        Write-Host "  [WARN] Role '$targetName' already exists — skipped. Use -NewRoleName to import under a different name." -ForegroundColor Yellow
-                        continue
-                    }
-
-                    # Resolve privileges — scope to this vCenter only
-                    $privsToAdd  = [System.Collections.Generic.List[object]]::new()
-                    $skippedList = [System.Collections.Generic.List[string]]::new()
-
-                    foreach ($privId in $import.Privileges) {
-                        $priv = Get-VIPrivilege -Server $viConn -Id $privId -ErrorAction SilentlyContinue
-                        if ($priv) { $privsToAdd.Add($priv) } else { $skippedList.Add($privId) }
-                    }
-
-                    if ($skippedList.Count -gt 0) {
-                        Write-Host "  [WARN] $($skippedList.Count) privilege(s) not found in target vCenter and will be skipped:" -ForegroundColor Yellow
-                        foreach ($s in $skippedList) { Write-Host "         - $s" -ForegroundColor Yellow }
-                    }
-
-                    # Create role and apply all resolved privileges in a single call
-                    $newRole = New-VIRole -Server $viConn -Name $targetName -ErrorAction Stop
-                    if ($privsToAdd.Count -gt 0) {
-                        $null = Set-VIRole -Server $viConn -Role $newRole -AddPrivilege $privsToAdd.ToArray() -ErrorAction Stop
-                    }
-
-                    Write-Host "  [OK]   '$targetName' created: $($privsToAdd.Count) privilege(s) applied, $($skippedList.Count) skipped." -ForegroundColor Green
-                } catch {
-                    Write-Host "  [ERROR] Failed to import '$file': $_" -ForegroundColor Red
+                $existing = Get-VIRole -Server $viConn -Name $targetName -ErrorAction SilentlyContinue
+                if ($existing) {
+                    Write-Log "Role '$targetName' already exists: skipped. Use -NewRoleName to import it under another name." -Level WARNING
+                    $skipped++
+                    continue
                 }
+
+                # Resolve privileges, scoped to this vCenter only
+                $privsToAdd  = [System.Collections.Generic.List[object]]::new()
+                $skippedList = [System.Collections.Generic.List[string]]::new()
+                foreach ($privId in $import.Privileges) {
+                    $priv = Get-VIPrivilege -Server $viConn -Id $privId -ErrorAction SilentlyContinue
+                    if ($priv) { $privsToAdd.Add($priv) } else { $skippedList.Add($privId) }
+                }
+                if ($skippedList.Count -gt 0) {
+                    Write-Log "$($skippedList.Count) privilege(s) of '$targetName' not found on this vCenter and left out:" -Level WARNING
+                    foreach ($sk in $skippedList) { Write-Log "    - $sk" -Level WARNING }
+                    $partial++
+                }
+
+                # Create the role and apply all resolved privileges in a single call
+                $newRole = New-VIRole -Server $viConn -Name $targetName -ErrorAction Stop
+                if ($privsToAdd.Count -gt 0) {
+                    $null = Set-VIRole -Server $viConn -Role $newRole -AddPrivilege $privsToAdd.ToArray() -ErrorAction Stop
+                }
+                Write-Log "'$targetName' created: $($privsToAdd.Count) privilege(s) applied, $($skippedList.Count) left out." -Level SUCCESS
+                $created++
+            } catch {
+                Add-RunFailure -Action 'Import' -Name $file.Name -Reason (Get-FailReason $_)
             }
         }
-    } catch {
-        Write-Host "  [ERROR] Import failed: $_" -ForegroundColor Red
+        $importFail = @($script:RunFailures | Where-Object { $_.Action -eq 'Import' }).Count
+        Write-RunSummary -Line "Import complete: $created role(s) created ($partial with parts left out), $skipped skipped (already exists), $importFail failed." `
+            -Failed $importFail -Skipped ($skipped + $partial) -Actions 'Import'
     }
 }
 
 # --- Disconnect ---------------------------------------------------------------
-Disconnect-VIServer -Server $vCenterServer -Confirm:$false -ErrorAction SilentlyContinue
-Write-Host "  [INFO] Disconnected from $vCenterServer." -ForegroundColor Cyan
-Write-Host ('=' * 62) -ForegroundColor DarkCyan
+Disconnect-VIServer -Server $viConn -Confirm:$false -ErrorAction SilentlyContinue
+Write-Log "Disconnected from $vCenterServer."
+if ($script:RunFailures.Count -gt 0) {
+    Write-Log "===== Script finished with $($script:RunFailures.Count) failure(s); see the summary above =====" -Level ERROR
+    Write-Host "`n  Log file: $LogFile`n" -ForegroundColor DarkGray
+    exit 1
+}
+Write-Log '===== Script finished =====' -Level SUCCESS
+Write-Host "`n  Log file: $LogFile`n" -ForegroundColor DarkGray

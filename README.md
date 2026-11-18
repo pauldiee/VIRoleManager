@@ -4,7 +4,7 @@ A PowerShell utility to export and import vCenter roles and their privilege assi
 
 | Script | Version | Purpose |
 |---|---|---|
-| `Invoke-VIRoleManager.ps1` | 1.3.1 | Export / import vCenter roles — **vSphere 9 only** |
+| `Invoke-VIRoleManager.ps1` | 1.4.0 | Export / import vCenter roles — **vSphere 9 only** |
 
 ---
 
@@ -29,8 +29,15 @@ Setting up PowerShell 7 and VCF.PowerCLI on a jump host, with or without interne
 # Interactive export — lists all custom roles, prompts for selection
 .\Invoke-VIRoleManager.ps1 -vCenterServer vc01.vcf.lab -Mode Export
 
-# Non-interactive export — export a specific role directly
+# Fully interactive: mode menu, folder prompt, picker
+.\Invoke-VIRoleManager.ps1 -vCenterServer vc01.vcf.lab
+
+# Non-interactive export — one role, or several names and wildcards
 .\Invoke-VIRoleManager.ps1 -vCenterServer vc01.vcf.lab -Mode Export -RoleName "TanzuUser"
+.\Invoke-VIRoleManager.ps1 -vCenterServer vc01.vcf.lab -Mode Export -RoleName 'Ops*','TanzuUser' -FilePath C:\RoleBackups
+
+# Import every role export in a folder, without the picker
+.\Invoke-VIRoleManager.ps1 -vCenterServer vc02.vcf.lab -Mode Import -FilePath 'C:\RoleBackups\*.json'
 
 # Export to a specific directory
 .\Invoke-VIRoleManager.ps1 -vCenterServer vc01.vcf.lab -Mode Export -FilePath C:\RoleBackups
@@ -50,31 +57,58 @@ Setting up PowerShell 7 and VCF.PowerCLI on a jump host, with or without interne
 
 Credentials are encrypted and saved as `<hostname>.cred` next to the script using `Export-Clixml` (DPAPI-protected, tied to the current Windows user).
 
+## How a run goes
+
+Without `-Mode` a menu asks for Export or Import. Without `-FilePath` the script then asks for the folder: **Enter** keeps the script directory (the default), **B** opens the Windows folder browser (only where a GUI is available), or type a path. Import shows how many JSON files the folder holds and asks again when it holds none. An export with `-RoleName` doesn't ask. Everything the console shows also goes to `Logs\VIRoleManager_<timestamp>.log` next to the script (`-LogDirectory` to change it).
+
 ## Interactive picker
 
-When running Export without `-RoleName`, the script presents a numbered list of all custom roles:
+When running Export without `-RoleName`, the script presents a numbered list of all custom roles; Import shows the JSON files in the folder with the role name and privilege count inside each:
 
 ```
-  Custom roles on vc01.vcf.lab:
-
-   [ 1]  TanzuUser                                     (6 privileges)
-   [ 2]  VDI Admins                                    (28 privileges)
-   [ 3]  Custom Read-Only                              (12 privileges)
-
-  Enter number(s) to export (comma-separated, or 'all'):
+  Roles on this vCenter: select the ones to EXPORT
+  [1]  TanzuUser                                     (6 privileges)
+  [2]  VDI Admins                                    (28 privileges)
+  [3]  Custom Read-Only                              (12 privileges)
 ```
 
-Enter `1,3` to export two roles, or `all` to export every custom role. Each selected role is saved as its own JSON file.
+The picker accepts single numbers, comma-separated lists, ranges (`2-6`), combinations (`1,3-5,8`), `all`, and `cancel` (or `exit`, `quit`, `q`). Each selected role is saved as its own JSON file.
+
+### Filtering a picker
+
+VCF vCenters carry dozens of custom service roles, so the picker filters by name. While a filter is on, the prompt shows it, for example `Your selection (filter: /cns, 4 shown)`.
+
+| To | Type |
+|---|---|
+| Narrow the list | A wildcard (`*cns*`) or `/text` for a substring |
+| Change the filter | The new filter straight away; it searches the full list again, not within the previous filter |
+| Clear the filter | `reset`, or just Enter |
+| See everything in the current list | `list` |
+
+The list is renumbered after every filter and after clearing it, so pick the number from the list shown just above the prompt. `all` takes what the filter shows. A filter that matches nothing leaves the list as it was. Above 50 items the picker shows a few examples and asks for a filter instead of printing the whole list.
+
+## Failures and exit codes
+
+A role that fails to export or import is logged in red as `FAILED …`, with vCenter's own message. The summary is red when something failed, yellow when something was only skipped (the role already exists, privileges left out because the target doesn't know them), green otherwise, and lists every failure.
+
+| Code | Meaning |
+|---|---|
+| 0 | Finished without failures (skips are allowed) |
+| 1 | Something failed: see the red `FAILED` lines and the summary, or the script could not start (PowerCLI, connection, no role matches `-RoleName`, `-FilePath` not found) |
+| 2 | Stopped because a prompt needed console input in an unattended run; the message names the parameters to pass. Save the credential first with one interactive run |
+
+From a scheduled task or another script, start it with `pwsh -Command` rather than `pwsh -File`: with `-File`, `-RoleName 'a','b'` arrives as one string.
 
 ## Parameters
 
 | Parameter | Type | Default | Description |
 |---|---|---|---|
 | `-vCenterServer` | `string` | *(required)* | FQDN or IP of the vCenter Server |
-| `-Mode` | `Export\|Import` | *(required)* | Operation mode |
-| `-RoleName` | `string` | *(interactive)* | Role to export — omit to use the interactive picker |
-| `-FilePath` | `string` | Next to script | Export: output file or directory. Import: input JSON file |
-| `-NewRoleName` | `string` | *(from file)* | Rename the role on import |
+| `-Mode` | `Export\|Import` | *(menu)* | Operation mode; a menu asks when omitted |
+| `-RoleName` | `string[]` | *(interactive)* | Export: role names or wildcards — omit to use the interactive picker |
+| `-FilePath` | `string` | Next to script | Export: output directory, or a file when exporting one role. Import: a JSON file, a wildcard (every match is imported) or a folder to pick from. Asked after the mode when omitted |
+| `-NewRoleName` | `string` | *(from file)* | Rename the role on import (single file only) |
+| `-LogDirectory` | `string` | `Logs\` next to script | Where the log file goes |
 | `-CredentialPath` | `string` | Next to script | Path to the encrypted credential file |
 | `-SkipCertificateValidation` | `switch` | — | Skip TLS validation — for lab use |
 | `-ResetCredentials` | `switch` | — | Force a new credential prompt |
