@@ -25,8 +25,7 @@
     not modify these permissions). Lab-verified 2026-11-19 on 9.1.1:
     RemoveAuthorizationRole(roleId, failIfUsed = $false) removes the role
     and that permission, and neither came back (checked after 5 minutes).
-    Whether the local group vcf_reserved_<roleId> stays behind was not
-    checked. A 9.0.x vCenter has no such permissions.
+    The local group vcf_reserved_<roleId> was gone too (vSphere Client). A 9.0.x vCenter has no such permissions.
 
 .PARAMETER vCenterServer
     FQDN or IP of the LAB vCenter Server.

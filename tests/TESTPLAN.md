@@ -44,11 +44,10 @@ outside this repository.
 |---|---|---|---|
 | R1 | `RemoveAuthorizationRole(<roleId>, $false)` on a custom role whose only permission is `VSPHERE.LOCAL\vcf_reserved_<roleId>` on the root folder | Role and that permission gone | **pass** |
 | R2 | Check again after 5 minutes | Neither came back | **pass** |
-| R3 | Does the local group `vcf_reserved_<roleId>` stay behind? | | **open**: the `UserDirectory.RetrieveUserGroups` lookup finds none of these groups, also not for an existing role; check in the vSphere Client (Administration, Single Sign On, Users and Groups, Groups) |
+| R3 | Does the local group `vcf_reserved_<roleId>` stay behind? | Gone | **pass**: gone, checked in the vSphere Client (Administration, Single Sign On, Users and Groups, Groups). The `UserDirectory.RetrieveUserGroups` lookup can't be used for this: it finds none of these groups, also not for an existing role |
 
 ## Open points
 
-- R3 (local group left behind or not), and whether VCF Operations notices
-  a removed custom role.
+- Whether VCF Operations notices a removed custom role.
 - Import of many roles into a second vCenter (LA to LB) not run: needs a
   saved credential for LB.
