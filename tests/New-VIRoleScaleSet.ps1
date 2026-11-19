@@ -15,13 +15,18 @@
             the roles. The same vCenter version gives the same sets on every
             run. Created with AuthorizationManager.AddAuthorizationRole, one
             call per role. Running Create again adds what is missing.
-    Remove  Deletes every VIRM-S-* role that no permission uses.
+    Remove  Deletes every VIRM-S-* role that no permission uses. With
+            -Force it also deletes a role whose only permissions are its
+            own VSPHERE.LOCAL\vcf_reserved_<roleId> ones (see below); a role
+            with any other permission is always kept.
 
     On VCF 9.1.1 vCenter gives every new role a permission on the root
-    folder for VSPHERE.LOCAL\vcf_reserved_<roleId>, managed by VCF
-    (Managing VCF Roles: do not modify them). Remove leaves such roles in
-    place and says so; on 9.1.1 the scale set therefore stays until the lab
-    is redeployed. A 9.0.x vCenter has no such permissions.
+    folder for VSPHERE.LOCAL\vcf_reserved_<roleId> (Managing VCF Roles: do
+    not modify these permissions). Lab-verified 2026-11-19 on 9.1.1:
+    RemoveAuthorizationRole(roleId, failIfUsed = $false) removes the role
+    and that permission, and neither came back (checked after 5 minutes).
+    Whether the local group vcf_reserved_<roleId> stays behind was not
+    checked. A 9.0.x vCenter has no such permissions.
 
 .PARAMETER vCenterServer
     FQDN or IP of the LAB vCenter Server.
@@ -31,6 +36,10 @@
 
 .PARAMETER RoleCount
     Number of roles (Create). Default 200.
+
+.PARAMETER Force
+    Remove mode: also delete VIRM-S-* roles whose only permissions are
+    their own vcf_reserved_<roleId> ones (VCF 9.1.1).
 
 .PARAMETER CredentialPath
     Saved credential file. Defaults to <vCenterServer>.cred in the repo root
@@ -47,14 +56,17 @@
 
 .NOTES
     Script   : New-VIRoleScaleSet.ps1
-    Version  : 0.1.0
+    Version  : 0.2.0
     Author   : Paul van Dieen
     Blog     : https://www.hollebollevsan.nl
     Requires : PowerShell 7.4+, VCF.PowerCLI 9.0+ or VMware.PowerCLI 13+
-    Tested   : Not yet tested
+    Tested   : Lab, 2026-11-19: VCF 9.1.1 (Holodeck lab A), 200 roles
 #>
 
 <# CHANGELOG
+    v0.2.0  2026-11-19  Paul van Dieen
+        - Remove -Force: also deletes roles whose only permissions are their
+          own vcf_reserved_<roleId> ones (VCF 9.1.1), lab-verified
     v0.1.0  2026-11-19  Paul van Dieen
         - Initial version: Create and Remove of a large role set for scale
           tests of Invoke-VIRoleManager.ps1 (#14)
@@ -64,6 +76,7 @@ param(
     [Parameter(Mandatory = $true)][string]$vCenterServer,
     [Parameter(Mandatory = $true)][ValidateSet('Create', 'Remove')][string]$Mode,
     [ValidateRange(1, 2000)][int]$RoleCount = 200,
+    [switch]$Force,
     [string]$CredentialPath = '',
     [switch]$SkipCertificateValidation
 )
@@ -71,7 +84,7 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$scriptVersion = '0.1.0'
+$scriptVersion = '0.2.0'
 $scriptAuthor  = 'Paul van Dieen'
 $scriptBlogUrl = 'https://www.hollebollevsan.nl'
 $repoRoot      = Split-Path $PSScriptRoot -Parent
@@ -129,20 +142,38 @@ try {
     else {
         $roles = @($authMgr.RoleList | Where-Object { $_.Name -like "$prefix*" })
         if ($roles.Count -eq 0) { Say "No $prefix* roles."; return }
-        # Which role IDs are in use, from every permission in one call
-        $used = @{}
+        # Permissions per role ID, from every permission in one call
+        $permsByRole = @{}
         foreach ($p in @($authMgr.RetrieveAllPermissions())) {
-            if ($null -ne $p) { $used[[int]$p.RoleId] = 1 + $(if ($used.ContainsKey([int]$p.RoleId)) { $used[[int]$p.RoleId] } else { 0 }) }
+            if ($null -eq $p) { continue }
+            $k = [int]$p.RoleId
+            if (-not $permsByRole.ContainsKey($k)) { $permsByRole[$k] = New-Object System.Collections.Generic.List[object] }
+            $permsByRole[$k].Add($p)
         }
-        $removed = 0; $kept = 0
+        $removed = 0; $kept = 0; $reservedOnly = 0
         foreach ($r in $roles) {
-            if ($used.ContainsKey([int]$r.RoleId)) { $kept++; continue }
-            $authMgr.RemoveAuthorizationRole($r.RoleId, $true)
-            $removed++
+            $perms = @(if ($permsByRole.ContainsKey([int]$r.RoleId)) { $permsByRole[[int]$r.RoleId].ToArray() })
+            $own   = "vcf_reserved_$($r.RoleId)"
+            if ($perms.Count -eq 0) {
+                $authMgr.RemoveAuthorizationRole($r.RoleId, $true)
+                $removed++
+            }
+            elseif (@($perms | Where-Object { ($_.Principal -split '\\')[-1] -ne $own }).Count -eq 0) {
+                # Only the role's own vcf_reserved_<roleId> permission(s) (VCF 9.1.1)
+                if ($Force) {
+                    $authMgr.RemoveAuthorizationRole($r.RoleId, $false)
+                    $removed++
+                } else { $reservedOnly++ }
+            }
+            else { $kept++ }
+            if (($removed + $kept + $reservedOnly) % 25 -eq 0) { Say "  $($removed + $kept + $reservedOnly) of $($roles.Count) checked" }
         }
         Say "Removed $removed role(s)." Yellow
+        if ($reservedOnly -gt 0) {
+            Say "Kept $reservedOnly role(s) that only their own vcf_reserved_<roleId> permission uses (VCF 9.1.1); run again with -Force to delete them too." Yellow
+        }
         if ($kept -gt 0) {
-            Say "Kept $kept role(s) that a permission uses (on VCF 9.1: vcf_reserved_*, managed by VCF; they go with a lab redeploy)." Red
+            Say "Kept $kept role(s) that another permission uses." Red
         }
     }
 }
