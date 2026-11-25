@@ -4,7 +4,7 @@ A PowerShell utility to export and import vCenter roles and their privilege assi
 
 | Script | Version | Purpose |
 |---|---|---|
-| `Invoke-VIRoleManager.ps1` | 1.5.0 | Export / import vCenter roles — **vSphere 9 only** |
+| `Invoke-VIRoleManager.ps1` | 1.6.0 | Export / import vCenter roles — **vSphere 9 only** |
 | `tests/New-VIRoleTestSet.ps1` | 1.0.1 | Builds, shows and removes a set of test roles in a **lab** vCenter |
 | `tests/New-VIRoleScaleSet.ps1` | 0.2.0 | Builds and removes 200 roles (50 to 400 privileges) in a **lab** vCenter |
 
@@ -50,6 +50,9 @@ Setting up PowerShell 7 and VCF.PowerCLI on a jump host, with or without interne
 # Import and rename the role
 .\Invoke-VIRoleManager.ps1 -vCenterServer vc02.vcf.lab -Mode Import -FilePath .\TanzuUser.json -NewRoleName "TanzuUser-v2"
 
+# Import again after registering a plugin: add the privileges existing roles miss
+.\Invoke-VIRoleManager.ps1 -vCenterServer vc02.vcf.lab -Mode Import -FilePath 'C:\RoleBackups\*.json' -ExistingRole Update
+
 # Lab environment (self-signed certificate)
 .\Invoke-VIRoleManager.ps1 -vCenterServer vc01.vcf.lab -Mode Export -SkipCertificateValidation
 
@@ -89,6 +92,20 @@ VCF vCenters carry dozens of custom service roles, so the picker filters by name
 
 The list is renumbered after every filter and after clearing it, so pick the number from the list shown just above the prompt. `all` takes what the filter shows. A filter that matches nothing leaves the list as it was. Above 50 items the picker shows a few examples and asks for a filter instead of printing the whole list.
 
+## Roles that already exist
+
+On import, a role whose name already exists on the target is not created again. Without `-ExistingRole` the script lists those roles and asks:
+
+| Answer | What happens |
+|---|---|
+| **S** or Enter | Skip them (the behaviour before 1.6.0) |
+| **U** | Update them all: add the privileges of the export that the role misses |
+| **P** | Pick the roles to update in the picker; the rest are skipped |
+
+Updating only adds privileges, it never removes any. It adds those that this vCenter knows; the rest are listed as left out, as on a new role. The typical case: plugin privileges (NSX, a backup or DR product) were left out at the first import because the plugin was not registered on the target yet. Register the plugin, run the import again and answer **U**. The log lists every added privilege.
+
+`-ExistingRole Skip` or `-ExistingRole Update` gives the answer up front. An unattended run without console input skips existing roles, as before, and does not stop with exit code 2.
+
 ## Failures and exit codes
 
 A role that fails to export or import is logged in red as `FAILED …`, with vCenter's own message. The summary is red when something failed, yellow when something was only skipped (the role already exists, privileges left out because the target doesn't know them), green otherwise, and lists every failure.
@@ -110,6 +127,7 @@ From a scheduled task or another script, start it with `pwsh -Command` rather th
 | `-RoleName` | `string[]` | *(interactive)* | Export: role names or wildcards — omit to use the interactive picker |
 | `-FilePath` | `string` | Next to script | Export: output directory, or a file when exporting one role. Import: a JSON file, a wildcard (every match is imported) or a folder to pick from. Asked after the mode when omitted |
 | `-NewRoleName` | `string` | *(from file)* | Rename the role on import (single file only) |
+| `-ExistingRole` | `Ask\|Skip\|Update` | `Ask` | Import: what to do with a role that already exists. Ask lists them and asks; Update adds the privileges it misses (never removes any); Skip skips them. Without console input Ask skips |
 | `-LogDirectory` | `string` | `Logs\` next to script | Where the log file goes |
 | `-CredentialPath` | `string` | Next to script | Path to the encrypted credential file |
 | `-SkipCertificateValidation` | `switch` | — | Skip TLS validation — for lab use |

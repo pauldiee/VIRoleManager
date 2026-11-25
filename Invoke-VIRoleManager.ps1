@@ -39,6 +39,18 @@
     Name for the imported role. Defaults to the role name stored in the export
     file. Use this to rename the role on import.
 
+.PARAMETER ExistingRole
+    Import mode: what to do with a role whose name already exists on the
+    target.
+    - Ask (default): list the existing roles and ask: S skip them, U update
+      them all, P pick the ones to update. Without console input (an
+      unattended run) they are skipped, as before.
+    - Skip: skip them without asking (the behaviour before 1.6.0).
+    - Update: add the privileges of the export that the role misses and
+      that this vCenter knows, for example plugin privileges left out at an
+      earlier import because the plugin was not registered yet. Nothing is
+      ever removed from an existing role.
+
 .PARAMETER CredentialPath
     Path to the encrypted credential file. Defaults to <vCenterServer>.cred
     next to the script.
@@ -74,18 +86,39 @@
     .\Invoke-VIRoleManager.ps1 -vCenterServer vc02.lab.local -Mode Import -FilePath 'D:\migration\roles\*.json'
 
 .EXAMPLE
+    # Import again after registering a plugin: add the privileges existing roles miss
+    .\Invoke-VIRoleManager.ps1 -vCenterServer vc02.lab.local -Mode Import -FilePath 'D:\migration\roles\*.json' -ExistingRole Update
+
+.EXAMPLE
     # Lab environment with self-signed certificate
     .\Invoke-VIRoleManager.ps1 -vCenterServer vc01.lab.local -Mode Export -SkipCertificateValidation
 
 .NOTES
     Author   : Paul van Dieen
     Blog     : https://www.hollebollevsan.nl
-    Version  : 1.5.0
+    Version  : 1.6.0
     Requires : PowerShell 7.4+, VCF.PowerCLI 9.0+ (or VMware.PowerCLI 13+)
     Tested   : vSphere 9
 #>
 
 <# CHANGELOG
+    v1.6.0  2026-11-25  Paul van Dieen
+        - Import can update roles that already exist (#17): new
+          -ExistingRole Ask|Skip|Update. Ask (default) lists the existing
+          roles and asks S skip, U update all or P pick; Update adds the
+          privileges of the export that the role misses and the target
+          knows (for example plugin privileges left out because the plugin
+          was not registered yet). Nothing is removed. Without console input
+          existing roles are skipped, as before. The log lists every added
+          privilege; the summary counts created, updated and already
+          complete roles
+        - An existing role is matched on its exact name (Get-VIRole -Name
+          also takes wildcards)
+        - Lab-verified on vCenter 9.1.1 (build 25784172), 2026-11-25: S,
+          P (one role), no console input (skipped, exit 0), Update twice
+          (second run: nothing added), an unknown privilege reported as
+          left out, a new role created next to the updated ones
+
     v1.5.0  2026-11-18  Paul van Dieen
         - Progress bar during long steps (#12): "n of N: item", the
           percentage and the time left, in the export and import per role,
@@ -186,6 +219,7 @@ param(
     [string[]]$RoleName = @(),
     [string]$FilePath,
     [string]$NewRoleName,
+    [ValidateSet('Ask','Skip','Update')][string]$ExistingRole = 'Ask',
     [string]$LogDirectory = '',
     [string]$CredentialPath,
     [switch]$SkipCertificateValidation,
@@ -195,7 +229,7 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$scriptVersion = '1.5.0'
+$scriptVersion = '1.6.0'
 $scriptAuthor  = 'Paul van Dieen'
 $scriptBlogUrl = 'https://www.hollebollevsan.nl'
 $scriptDir     = if ($PSScriptRoot) { $PSScriptRoot } else { (Get-Location).Path }
@@ -650,6 +684,9 @@ if ($RoleName.Count -gt 0 -and $Mode -ne 'Export') {
 if ($NewRoleName -and $Mode -ne 'Import') {
     Write-Host '  [WARN] -NewRoleName only applies in Import mode and will be ignored.' -ForegroundColor Yellow
 }
+if ($PSBoundParameters.ContainsKey('ExistingRole') -and $Mode -ne 'Import') {
+    Write-Host '  [WARN] -ExistingRole only applies in Import mode and will be ignored.' -ForegroundColor Yellow
+}
 
 # --- Folder (#10, as VDSPortGroupManager #18) ---------------------------------------
 # Without -FilePath an interactive run asks for the folder: Enter keeps the
@@ -898,7 +935,59 @@ if ($Mode -eq 'Import') {
     if ($files.Count -eq 0) {
         Write-Log 'No files selected. Skipping import.' -Level WARNING
     } else {
-        $created = 0; $skipped = 0; $partial = 0
+        # Roles that already exist on the target (#17): skip them (as before),
+        # or add the privileges they miss compared with the export, for
+        # example plugin privileges that were left out because the plugin was
+        # not registered on the target yet at the first import.
+        $existingNames = @(Get-VIRole -Server $viConn -ErrorAction Stop | ForEach-Object { $_.Name })
+        $existingPlan  = @(foreach ($file in $files) {
+            try {
+                $peek = Get-Content -Path $file.FullName -Raw -ErrorAction Stop | ConvertFrom-Json
+                $peekTarget = if ($NewRoleName -and $files.Count -eq 1) { $NewRoleName } else { $peek.RoleName }
+                if ($existingNames -contains $peekTarget) {
+                    [pscustomobject]@{ Name = $peekTarget; Label = ('{0,-45} (from {1})' -f $peekTarget, $file.Name) }
+                }
+            } catch { }   # an unreadable file fails in the import loop, with its reason
+        })
+        $updateNames = @()
+        if ($existingPlan.Count -gt 0) {
+            if ($ExistingRole -eq 'Update') {
+                $updateNames = @($existingPlan | ForEach-Object { $_.Name })
+            } elseif ($ExistingRole -eq 'Ask') {
+                Write-Host "`n  $($existingPlan.Count) role(s) already exist on ${vCenterServer}:" -ForegroundColor Cyan
+                Write-ItemList -Items $existingPlan -DisplayProperty 'Label'
+                Write-Host "`n  [S] skip them (default), [U] update them all: add the privileges they miss," -ForegroundColor Gray
+                Write-Host "  [P] pick the roles to update, or 'cancel' (or exit, quit, q) to stop." -ForegroundColor Gray
+                Write-Host '  Updating only adds privileges; it never removes any.' -ForegroundColor Gray
+                while ($true) {
+                    # No console input (unattended run): skip, as before; no exit 2 here.
+                    $answer = $null
+                    try { $answer = Read-Host '  Existing roles' } catch { }
+                    if ($null -eq $answer) {
+                        Write-Log 'No console input: existing roles are skipped. Pass -ExistingRole Update to add the privileges they miss.' -Level WARNING
+                        break
+                    }
+                    $answer = $answer.Trim()
+                    if (Test-CancelInput $answer) {
+                        Write-Log 'Cancelled at the existing-roles question; nothing imported.' -Level WARNING
+                        Disconnect-VIServer -Server $viConn -Confirm:$false -ErrorAction SilentlyContinue
+                        exit 0
+                    }
+                    if ($answer -eq '' -or $answer -match '^[Ss]$') { break }
+                    if ($answer -match '^[Uu]$') { $updateNames = @($existingPlan | ForEach-Object { $_.Name }); break }
+                    if ($answer -match '^[Pp]$') {
+                        $updateNames = @(Select-MultipleItems -Items $existingPlan -DisplayProperty 'Label' -NameProperty 'Name' -Title 'Existing roles: select the ones to UPDATE' | ForEach-Object { $_.Name })
+                        break
+                    }
+                    Write-Host '  Type S, U or P.' -ForegroundColor Red
+                }
+            }
+            if ($updateNames.Count -gt 0) {
+                Write-Log "Existing role(s) to update (missing privileges added): $($updateNames -join ', ')"
+            }
+        }
+
+        $created = 0; $skipped = 0; $partial = 0; $updated = 0; $current = 0
         $no = 0
         foreach ($file in $files) {
             $no++
@@ -910,9 +999,11 @@ if ($Mode -eq 'Import') {
                 $targetName = if ($NewRoleName -and $files.Count -eq 1) { $NewRoleName } else { $import.RoleName }
                 Write-Log "Importing '$($import.RoleName)' as '$targetName' ($(@($import.Privileges).Count) privilege(s), exported from $($import.ExportedFrom) on $($import.ExportedAt))."
 
-                $existing = Get-VIRole -Server $viConn -Name $targetName -ErrorAction SilentlyContinue
-                if ($existing) {
-                    Write-Log "Role '$targetName' already exists: skipped. Use -NewRoleName to import it under another name." -Level WARNING
+                # Exact name only: -Name also takes wildcards
+                $existing = Get-VIRole -Server $viConn -Name $targetName -ErrorAction SilentlyContinue |
+                    Where-Object { $_.Name -eq $targetName } | Select-Object -First 1
+                if ($existing -and $updateNames -notcontains $targetName) {
+                    Write-Log "Role '$targetName' already exists: skipped. Use -ExistingRole Update to add the privileges it misses, or -NewRoleName to import it under another name." -Level WARNING
                     $skipped++
                     continue
                 }
@@ -934,6 +1025,22 @@ if ($Mode -eq 'Import') {
                     $partial++
                 }
 
+                # Existing role (#17): add only what it misses, never remove anything
+                if ($existing) {
+                    $have    = @($existing.PrivilegeList)
+                    $missing = @($privsToAdd | Where-Object { $have -notcontains $_.Id })
+                    if ($missing.Count -gt 0) {
+                        $null = Set-VIRole -Server $viConn -Role $existing -AddPrivilege $missing -ErrorAction Stop
+                        Write-Log "'$targetName' updated: $($missing.Count) privilege(s) added, $($skippedList.Count) left out:" -Level SUCCESS
+                        foreach ($m in $missing) { Write-Log "    + $($m.Id)" -Level SUCCESS }
+                        $updated++
+                    } else {
+                        Write-Log "'$targetName' already has every privilege of the export that this vCenter knows: nothing added." -Level SUCCESS
+                        $current++
+                    }
+                    continue
+                }
+
                 # Create the role and apply all resolved privileges in a single call
                 $newRole = New-VIRole -Server $viConn -Name $targetName -ErrorAction Stop
                 if ($privsToAdd.Count -gt 0) {
@@ -948,7 +1055,7 @@ if ($Mode -eq 'Import') {
         Complete-Progress -Id 2
         Complete-Progress
         $importFail = @($script:RunFailures | Where-Object { $_.Action -eq 'Import' }).Count
-        Write-RunSummary -Line "Import complete: $created role(s) created ($partial with parts left out), $skipped skipped (already exists), $importFail failed." `
+        Write-RunSummary -Line "Import complete: $created role(s) created, $updated updated, $current already complete ($partial with privileges left out), $skipped skipped (already exists), $importFail failed." `
             -Failed $importFail -Skipped ($skipped + $partial) -Actions 'Import'
     }
 }
