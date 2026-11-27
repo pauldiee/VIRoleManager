@@ -70,7 +70,7 @@ Setting up PowerShell 7 and VCF.PowerCLI on a jump host, with or without interne
 .\Invoke-VIRoleManager.ps1 -vCenterServer vc01.vcf.lab -Mode Export -ResetCredentials
 ```
 
-Credentials are encrypted and saved as `<hostname>.cred` next to the script using `Export-Clixml` (DPAPI-protected, tied to the current Windows user).
+The first run asks for the vCenter login and saves it; see [Credentials](#credentials).
 
 ## How a run goes
 
@@ -179,6 +179,10 @@ Lab findings (vCenter 8.0.3 build 25600417 to 9.1.1 build 25784172, 2026-11-16, 
 - Removing such a role is possible (lab-verified on VCF 9.1.1, 2026-11-19): `RemoveAuthorizationRole(<roleId>, $false)`, which the vSphere Client's *Delete role* with *remove permissions* also does, deletes the role together with its own `vcf_reserved_<roleId>` permission. Neither came back (checked after 5 minutes), and no `vcf_reserved` permission was left pointing at a deleted role. Broadcom's *Managing VCF Roles* says not to modify these permissions on roles that stay; removing a custom role isn't covered there. The local group `vcf_reserved_<roleId>` was gone as well (checked in the vSphere Client, Administration, Single Sign On, Users and Groups).
 
 `tests/New-VIRoleScaleSet.ps1` builds 200 roles (`VIRM-S-001` and up, 50 to 400 privileges each) for scale tests. `-Mode Remove` deletes the ones no permission uses; with `-Force` also those whose only permission is their own `vcf_reserved_<roleId>` (VCF 9.1.1). Test cases and results: `tests/TESTPLAN.md`.
+
+## Credentials
+
+Credentials are encrypted and saved as `<hostname>.cred` next to the script using `Export-Clixml` (DPAPI-protected, tied to the current Windows user). `*.cred` files are git-ignored.
 
 ## Author
 
