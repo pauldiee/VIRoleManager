@@ -4,7 +4,7 @@ A PowerShell utility to export and import vCenter roles and their privilege assi
 
 | Script | Version | Purpose |
 |---|---|---|
-| `Invoke-VIRoleManager.ps1` | 1.7.0 | Export / import vCenter roles — **vSphere 9 only** |
+| `Invoke-VIRoleManager.ps1` | 1.8.0 | Export / import vCenter roles — **vSphere 9 only** |
 | `tests/New-VIRoleTestSet.ps1` | 1.0.1 | Builds, shows and removes a set of test roles in a **lab** vCenter |
 | `tests/New-VIRoleScaleSet.ps1` | 0.2.0 | Builds and removes 200 roles (50 to 400 privileges) in a **lab** vCenter |
 
@@ -53,6 +53,9 @@ Setting up PowerShell 7 and VCF.PowerCLI on a jump host, with or without interne
 
 # Import every role export in a folder, without the picker
 .\Invoke-VIRoleManager.ps1 -vCenterServer vc02.vcf.lab -Mode Import -FilePath 'C:\RoleBackups\*.json'
+
+# Preview the same import: what would be created or updated, nothing changed
+.\Invoke-VIRoleManager.ps1 -vCenterServer vc02.vcf.lab -Mode Import -FilePath 'C:\RoleBackups\*.json' -DryRun
 
 # Export to a specific directory
 .\Invoke-VIRoleManager.ps1 -vCenterServer vc01.vcf.lab -Mode Export -FilePath C:\RoleBackups
@@ -145,6 +148,7 @@ From a scheduled task or another script, start it with `pwsh -Command` rather th
 | `-CredentialPath` | `string` | Next to script | Path to the encrypted credential file |
 | `-SkipCertificateValidation` | `switch` | — | Accept a certificate this machine does not trust (lab use). Without it the script asks whether to go on without the check for this run; an unattended run stops with exit code 2 (before W38 such a vCenter was connected silently) (1.7.0) |
 | `-ResetCredentials` | `switch` | — | Force a new credential prompt |
+| `-DryRun` | `switch` | — | Import: show what would be created or updated (`[DryRun] Would ...` lines, "would be" in the summary) without changing anything (1.8.0). Ignored with a warning in Export mode |
 
 ## Export file format
 
