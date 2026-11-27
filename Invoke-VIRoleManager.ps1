@@ -1,4 +1,4 @@
-﻿<#
+<#
 .SYNOPSIS
     Export or import vCenter roles and their privilege assignments.
 
@@ -66,6 +66,15 @@
 .PARAMETER ResetCredentials
     Force a new credential prompt even if a saved credential file exists.
 
+.PARAMETER DryRun
+    Import mode: show what would be created or updated ([DryRun] Would ...
+    lines, "would be" in the summary) without changing anything on the
+    vCenter. Ignored with a warning in Export mode.
+
+.EXAMPLE
+    # Preview an import: what would be created or updated, nothing changed
+    .\Invoke-VIRoleManager.ps1 -vCenterServer vc02.lab.local -Mode Import -FilePath 'D:\migration\roles\*.json' -DryRun
+
 .EXAMPLE
     # Interactive export — lists all custom roles, prompts for selection
     .\Invoke-VIRoleManager.ps1 -vCenterServer vc01.lab.local -Mode Export
@@ -101,12 +110,18 @@
 .NOTES
     Author   : Paul van Dieen
     Blog     : https://www.hollebollevsan.nl
-    Version  : 1.7.0
+    Version  : 1.8.0
     Requires : PowerShell 7.4+, VCF.PowerCLI 9.0+ (or VMware.PowerCLI 13+)
     Tested   : vSphere 9
 #>
 
 <# CHANGELOG
+    v1.8.0  2026-11-27  Paul van Dieen
+        - -DryRun for Import (#19, W30): [DryRun] Would create / Would update
+          lines with the privileges that would be added, the summary says
+          'would be' and ends with 'Dry run: nothing was changed.'; nothing is
+          changed on the vCenter. Ignored with a warning in Export mode
+
     v1.7.0  2026-11-27  Paul van Dieen
         - Start without -vCenterServer (W38, as nsx-segment-migration and
           VITagManager 1.5.0): the script asks for the vCenter and lists the
@@ -240,13 +255,14 @@ param(
     [string]$LogDirectory = '',
     [string]$CredentialPath,
     [switch]$SkipCertificateValidation,
-    [switch]$ResetCredentials
+    [switch]$ResetCredentials,
+    [switch]$DryRun
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$scriptVersion = '1.7.0'
+$scriptVersion = '1.8.0'
 $scriptAuthor  = 'Paul van Dieen'
 $scriptBlogUrl = 'https://www.hollebollevsan.nl'
 $scriptDir     = if ($PSScriptRoot) { $PSScriptRoot } else { (Get-Location).Path }
@@ -738,6 +754,9 @@ if ($RoleName.Count -gt 0 -and $Mode -ne 'Export') {
 if ($NewRoleName -and $Mode -ne 'Import') {
     Write-Host '  [WARN] -NewRoleName only applies in Import mode and will be ignored.' -ForegroundColor Yellow
 }
+if ($DryRun -and $Mode -ne 'Import') {
+    Write-Host '  [WARN] -DryRun only applies in Import mode and will be ignored.' -ForegroundColor Yellow
+}
 if ($PSBoundParameters.ContainsKey('ExistingRole') -and $Mode -ne 'Import') {
     Write-Host '  [WARN] -ExistingRole only applies in Import mode and will be ignored.' -ForegroundColor Yellow
 }
@@ -856,6 +875,7 @@ if ($ResetCredentials -or -not (Test-Path $CredentialPath)) {
 # --- Connect to vCenter -------------------------------------------------------
 Write-Log "===== VIRoleManager started (Mode: $Mode) ====="
 Write-Log "vCenter:  $vCenterServer"
+if ($DryRun -and $Mode -eq 'Import') { Write-Log 'DRY RUN: nothing will be changed on the vCenter.' -Level WARNING }
 Write-Log "Folder:   $(if ($FilePath) { $FilePath } else { $scriptDir })"
 Write-Log "Log File: $LogFile"
 Write-Log "Connecting to $vCenterServer ..."
@@ -1100,7 +1120,11 @@ if ($Mode -eq 'Import') {
                 if ($existing) {
                     $have    = @($existing.PrivilegeList)
                     $missing = @($privsToAdd | Where-Object { $have -notcontains $_.Id })
-                    if ($missing.Count -gt 0) {
+                    if ($missing.Count -gt 0 -and $DryRun) {
+                        Write-Log "[DryRun] Would update '$targetName': add $($missing.Count) privilege(s), $($skippedList.Count) left out:"
+                        foreach ($m in $missing) { Write-Log "    + $($m.Id)" }
+                        $updated++
+                    } elseif ($missing.Count -gt 0) {
                         $null = Set-VIRole -Server $viConn -Role $existing -AddPrivilege $missing -ErrorAction Stop
                         Write-Log "'$targetName' updated: $($missing.Count) privilege(s) added, $($skippedList.Count) left out:" -Level SUCCESS
                         foreach ($m in $missing) { Write-Log "    + $($m.Id)" -Level SUCCESS }
@@ -1113,6 +1137,11 @@ if ($Mode -eq 'Import') {
                 }
 
                 # Create the role and apply all resolved privileges in a single call
+                if ($DryRun) {
+                    Write-Log "[DryRun] Would create '$targetName' with $($privsToAdd.Count) privilege(s), $($skippedList.Count) left out."
+                    $created++
+                    continue
+                }
                 $newRole = New-VIRole -Server $viConn -Name $targetName -ErrorAction Stop
                 if ($privsToAdd.Count -gt 0) {
                     $null = Set-VIRole -Server $viConn -Role $newRole -AddPrivilege $privsToAdd.ToArray() -ErrorAction Stop
@@ -1126,8 +1155,11 @@ if ($Mode -eq 'Import') {
         Complete-Progress -Id 2
         Complete-Progress
         $importFail = @($script:RunFailures | Where-Object { $_.Action -eq 'Import' }).Count
-        Write-RunSummary -Line "Import complete: $created role(s) created, $updated updated, $current already complete ($partial with privileges left out), $skipped skipped (already exists), $importFail failed." `
+        $wb = if ($DryRun) { 'would be ' } else { '' }
+        $head = if ($DryRun) { 'Dry run complete' } else { 'Import complete' }
+        Write-RunSummary -Line "${head}: $created role(s) ${wb}created, $updated ${wb}updated, $current already complete ($partial with privileges left out), $skipped skipped (already exists), $importFail failed." `
             -Failed $importFail -Skipped ($skipped + $partial) -Actions 'Import'
+        if ($DryRun) { Write-Log 'Dry run: nothing was changed.' -Level WARNING }
     }
 }
 

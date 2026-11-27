@@ -59,6 +59,16 @@ outside this repository.
 
 The home vCenter (.65) was off during a first run: picking it gave "Failed to connect ... (192.168.2.65:443)", exit 1. Not provoked: the error trap.
 
+**1.8.0 (-DryRun, #19, W30), 2026-11-27, lab B (vCenter 9.0.2):** an export of the 60 custom roles of lab B (read-only), then dry-run imports into lab B itself.
+
+| # | Steps | Result |
+|---|---|---|
+| D1 | `DatastoreConsumer.json` with `-NewRoleName VIRM-DryRun-Test -DryRun` | **pass**: "DRY RUN: nothing will be changed", "[DryRun] Would create 'VIRM-DryRun-Test' with 4 privilege(s), 0 left out.", "Dry run complete: 1 role(s) would be created ...", "Dry run: nothing was changed.", exit 0 |
+| D2 | `DatastoreConsumer.json`, `-ExistingRole Update -DryRun` (role complete) | **pass**: "already has every privilege ...: nothing added", 1 already complete, exit 0 |
+| D3 | A copy with one extra privilege (`VirtualMachine.Interact.PowerOn`), `-ExistingRole Update -DryRun` | **pass**: "[DryRun] Would update 'DatastoreConsumer': add 1 privilege(s)", "1 would be updated", exit 0 |
+| D4 | `-Mode Export -DryRun` | **pass**: "[WARN] -DryRun only applies in Import mode and will be ignored." |
+| D5 | Check afterwards | **pass**: `VIRM-DryRun-Test` not in the role list; a new export of `DatastoreConsumer` still has 4 privileges |
+
 ## Open points
 
 - Whether VCF Operations notices a removed custom role.
